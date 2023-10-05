@@ -6,13 +6,13 @@ using Distributions
 using TOML
 using Plots
 
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/utilities.jl"); # Random utilities
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/CoordinateSystems.jl"); # Coordinate system functions
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/psi_structures.jl"); # Main structures
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/psi_buildinputs.jl"); # Inversion routines
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/psi_forward.jl"); # Forward problem routines
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/psi_inverse.jl"); # Inversion routines
-include("/Users/bvanderbeek/research/software/JuliaProjects/PSI/psi_interpolations.jl"); # Interpolation routines
+include("src/utilities.jl"); # Random utilities
+include("src/CoordinateSystems.jl"); # Coordinate system functions
+include("src/psi_structures.jl"); # Main structures
+include("src/psi_buildinputs.jl"); # Inversion routines
+include("src/psi_forward.jl"); # Forward problem routines
+include("src/psi_inverse.jl"); # Inversion routines
+include("src/psi_interpolations.jl"); # Interpolation routines
 
 # Build Input Parameters
 Obs, Model, InvParam, Solv, Dp = build_inputs("/Users/bvanderbeek/research/CASCADIA/Joint/PSI_Inputs/deterministic/psi_parameters.toml");
