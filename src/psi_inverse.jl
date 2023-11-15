@@ -1,177 +1,669 @@
-# Main inversion function
-function psi_inverse!(Model::ModelTauP, ΔM::SeismicPerturbationModel, Obs::Vector{<:Observable}, S::SolverLSQR)
+#################### SOLVERS ####################
+
+# Solver: Structures for storing parameters relevant to the inverse problem solver
+abstract type InverseMethod end
+abstract type LinearisedSolver <: InverseMethod end
+
+# Solver LSQR
+struct SolverLSQR{T} <: LinearisedSolver
+    damp::T # Solver internal damping parameter; should generally be zero
+    atol::T # Stopping tolerance; see lsqr documentation (1e-6)
+    conlim::T # Stopping tolerance; see lsqr documentation (1e8)
+    maxiter::Int # Maximum number of solver iterations (maximum(size(A)))
+    verbose::Bool # Output solver iteration info
+    # Custom options
+    tf_jac_scale::Bool # Apply Jacobian scaling to system
+    nonlinit::Int # Maximum number of non-linear iterations for iterative linearised approach
+end
+
+
+#################### INVERSION PARAMETERS ####################
+
+abstract type InversionParameter end
+
+# Parameter Field: Structure to hold a parameter discretised in space
+struct ParameterField{T,N} <: InversionParameter
+    Mesh::AbstractMesh # Mesh defining discretisation of parameters
+    dm::Array{T,N} # cumulative perturbations to parameters
+    ddm::Array{T,N} # Incremental perturbations to parameters
+    m0::Array{T,N} # Starting model values
+    uncertainty::Array{T,N} # A priori fractional uncertainty
+    # Regularisation parameters
+    wdamp::Vector{T} # Damping Weight (square-root of Lagrangian Multiplier)
+    tf_damp_cumulative::Vector{Bool} # Penalize cumulative (true) or incremental (false) perturbations
+    wsmooth::Vector{T} # Smoothing Weight (square-root of Lagrangian Multiplier)
+    tf_smooth_cumulative::Vector{Bool} # Penalize cumulative (true) or incremental (false) roughness
+    # Jacobian info
+    jcol::Vector{Int} # Jacobian column index for parameter 
+    RSJS::Array{T,N} # Row-sum of the Jacobian-squared (i.e. a proxy for parameter sensitivity)
+end
+# Initialises a ParameterField
+function ParameterField(Mesh; dm = zeros(Float64, size(Mesh)), ddm = zeros(Float64, size(Mesh)), m0 = zeros(Float64, size(Mesh)),
+    uncertainty = ones(Float64, size(Mesh)), wdamp = zeros(Float64, 1), tf_damp_cumulative = [false], wsmooth = zeros(Float64, ndims(Mesh)),
+    tf_smooth_cumulative = [false], jcol = [1, length(Mesh)], RSJS = zeros(Float64, size(Mesh)))
+
+    return ParameterField(Mesh, dm, ddm, m0, uncertainty, wdamp, tf_damp_cumulative, wsmooth, tf_smooth_cumulative, jcol, RSJS)
+end
+# Custom display of structure
+function Base.show(io::IO, obj::ParameterField)
+    S = split(string(typeof(obj.Mesh)),"{")
+    println(io, "ParameterField")
+    println(io, "--> Mesh:             ", S[1])
+    println(io, "--> Size:             ", size(obj.Mesh))
+    println(io, "--> Coordinates:      ", S[2])
+    println(io, "--> Parameterisation: ", typeof(obj.m0))
+
+    return nothing
+end
+
+# Statics. Even though these structures are the same, need to break them up for dispatch.
+abstract type SeismicStatics <: InversionParameter end
+
+# Seismic Sources
+struct SeismicSourceStatics{K, T, L} <: SeismicStatics
+    dm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and cumulative static perturbations
+    ddm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and incremental static perturbations
+    uncertainty::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and static uncertainty
+    wdamp::Dict{L,T} # Dictionary of (Static Type, Static Phase) *keys* and their damping weights
+    tf_damp_cumulative::Bool
+    jcol::Dict{K,Int} # Dictionary of (ID, Static Type, Static Phase) *keys* and Jacobian column index
+    RSJS::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and row-sum of Jacobian squared value
+end
+function SeismicSourceStatics(id, static_types, static_phases, tf_damp_cumulative, wdamp, uncertainty)
+
+    # Initialise dictionaries and statics structure
+    Ki = eltype(id)
+    Ko = eltype(static_types)
+    Kp = eltype(static_phases)
+    T = eltype(wdamp)
+    S = SeismicSourceStatics(Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(),
+    Dict{Tuple{Ko, Kp}, T}(), tf_damp_cumulative, Dict{Tuple{Ki, Ko, Kp}, Int}(), Dict{Tuple{Ki, Ko, Kp}, T}())
+    # Fill the dictionaries
+    initialise_static_dictionaries!(S, id, static_types, static_phases, wdamp, uncertainty)
+
+    return S
+end
+
+# Seismic Receivers
+struct SeismicReceiverStatics{K, T, L} <: SeismicStatics
+    dm::Dict{K,T}
+    ddm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and static value
+    uncertainty::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and static uncertainty
+    wdamp::Dict{L,T} # Dictionary of (Static Type, Static Phase) *keys* and their damping weight
+    tf_damp_cumulative::Bool
+    jcol::Dict{K,Int} # Dictionary of (ID, Static Type, Static Phase) *keys* and Jacobian column index
+    RSJS::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and row-sum of Jacobian squared value
+end
+function SeismicReceiverStatics(id, static_types, static_phases, tf_damp_cumulative, wdamp, uncertainty)
+
+    # Initialise dictionaries and statics structure
+    Ki = eltype(id)
+    Ko = eltype(static_types)
+    Kp = eltype(static_phases)
+    T = eltype(wdamp)
+    S = SeismicReceiverStatics(Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(),
+    Dict{Tuple{Ko, Kp}, T}(), tf_damp_cumulative, Dict{Tuple{Ki, Ko, Kp}, Int}(), Dict{Tuple{Ki, Ko, Kp}, T}())
+    # Fill the dictionaries
+    initialise_static_dictionaries!(S, id, static_types, static_phases, wdamp, uncertainty)
+
+    return S
+end
+# Initialise static dictionaries for inversion
+function initialise_static_dictionaries!(S::SeismicStatics, Ki, Ko, Kp, wdamp, uncertainty)
+    # Fill dictionaries
+    n = 0
+    for k in eachindex(Kp) # Phase Type
+        for j in eachindex(Ko) # Observation Type
+            kj_damp = wdamp[k][j] # Damping for (phase, observable) pair
+            kj_uncertainty = uncertainty[k][j] # Uncertainty for (phase, observable) pair
+            S.wdamp[(Ko[j], Kp[k])] = kj_damp # Damping parameter--can be unique for each (Observable, SeismicPhase) pair
+            for i in eachindex(Ki) # Unique Identifyer (i.e. receiver or source ID)
+                n += 1
+                S.dm[(Ki[i], Ko[j], Kp[k])] = 0.0  # Assign initial cummulative static perturbation
+                S.ddm[(Ki[i], Ko[j], Kp[k])] = 0.0 # Assign initial incremental static perturbation
+                S.uncertainty[(Ki[i], Ko[j], Kp[k])] = kj_uncertainty # Assign static uncertainty
+                S.jcol[(Ki[i], Ko[j], Kp[k])] = n # Assign unique index number for Jacobian
+                S.RSJS[(Ki[i], Ko[j], Kp[k])] = 0.0 # Initial row-sum of Jacobian squared
+            end
+        end
+    end
+
+    return nothing
+end
+
+struct InverseSeismicVelocity{I, A} <: InversionParameter
+    Isotropic::I
+    Anisotropic::A
+end
+struct InverseIsotropicSlowness <: InversionParameter
+    Up::Union{<:ParameterField, Nothing}
+    Us::Union{<:ParameterField, Nothing}
+    coupling_option::Int # 0 = independent, 1 = solve for us/up ratio instead of us
+end
+struct InverseAnisotropicVector{T, U} <: InversionParameter
+    Orientations::T
+    Fractions::U
+end
+struct InverseAzRadVector <: InversionParameter
+    A::Union{<:ParameterField, Nothing} # f*cos²θ*cos2ϕ
+    B::Union{<:ParameterField, Nothing} # f*cos²θ*sin2ϕ
+    C::Union{<:ParameterField, Nothing} # √f*sinθ
+end
+
+# Seismic Perturbation Model: A container for all possible inversion parameters
+# for which one can invert seismic observables
+struct SeismicPerturbationModel{T1, T2, T3, T4, T5} <: InversionParameter
+    Velocity::T1
+    Interface::T2
+    Hypocenter::T3
+    SourceStatics::T4
+    ReceiverStatics::T5
+end
+function SeismicPerturbationModel(; Velocity = nothing, Interface = nothing, Hypocenter = nothing,
+    SourceStatics = nothing, ReceiverStatics = nothing)
+
+    return SeismicPerturbationModel(Velocity, Interface, Hypocenter, SourceStatics, ReceiverStatics)
+end
+
+
+
+# MAIN INVERSION FUNCTION
+
+# Solve linearized inverse problem of the form Ax = b using the LSQR solver
+function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel, PerturbationModel::SeismicPerturbationModel, Solver::SolverLSQR)
     # Assign Jacobian indices to parameters. Returns total number of parameters (i.e. Jacobian columns).
-    npar = assign_jacobian_indices!(ΔM)
-
-    # Allocate solution vectors
+    npar = assign_jacobian_indices!(PerturbationModel)
+    nobs = length(Observations)
+    # Allocate solution vector
     x = zeros(npar)
-
-    # Compute kernels and relative residuals for all observations
-    # For TauP models, this only needs to be done once as the rays are 1D predictions
-    K, b, = psi_forward(Obs, Model)
-    nobs = length(b)
-
-    # Initial sum of squared (relative) residuals
-    wssrₖ = sum(x -> x^2, b; init = 0.0)
-    # Initial F-statistic
+    # Critical value for F-distribution (95%)
     fcrit = quantile(FDist(nobs - 1, nobs - 1), 0.95)
-    fstat = 10.0*fcrit
+    fstat = 10.0*fcrit # Initialise an initial F-statisitic > fcrit
 
-    # Inner inversion iterations (i.e. no ray tracing)
+    # Compute kernels and relative residuals (b-vector) for all observations
+    println("Calling forward problem for all observations. \n")
+    _, b, Kernels = psi_forward(Observations, ForwardModel)
+    # Initial sum of squared (relative) residuals
+    wssr_k = sum(b -> b^2, b; init = 0.0)
+
+    # Inner inversion iterations (i.e. no kernel sensitivity update)
     kiter = 0
-    while (fstat > fcrit) && (kiter < S.nonlinit)
+    while (fstat > fcrit) && (kiter < Solver.nonlinit)
         println("Starting iteration ", string(kiter + 1), ".")
-        # Initialise the Jacobian row (i.e. observation) counter
-        nobs = 0
 
         # Build Jacobian Matrix
-        Aᵢ, Aⱼ, Aᵥ = psi_build_jacobian(ΔM, Obs, K; Δi = nobs)
+        Aᵢ, Aⱼ, Aᵥ = psi_build_jacobian(PerturbationModel, Kernels; row_offset = 0)
 
         # Update row counter when finished building Jacobian for all observations in a set
-        nobs = maximum(Aᵢ)
+        jrow = maximum(Aᵢ) # Should equal 'nobs'
+        println("Number of observations: ", string(jrow), ".")
         println("Number of parameters: ", string(npar), ".")
-        println("Number of observations: ", string(nobs), ".")
 
         # Compute row-sum of the Jacobian squared (RSJS)
-        accumarray!(x, Aⱼ, Aᵥ, x -> x^2);
+        accumarray!(x, Aⱼ, Aᵥ, x -> x^2)
         # Assign to parameters
-        fill_rsjs!(ΔM, x)
+        fill_rsjs!(PerturbationModel, x)
         # Reset solution vector
-        fill!(x, zero(eltype(x)))
+        fill!(x, 0.0)
 
         # Build Constraint Equations
-        build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔM; Δi = nobs, tf_jac_scale = S.tf_jac_scale)
+        build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel; row_offset = jrow, tf_jac_scale = Solver.tf_jac_scale)
 
         # Update row counter when finished building Jacobian for all observations in a set
         nrows = maximum(Aᵢ)
         println("Number of constraints: ", string(nrows - nobs), ".")
 
         # Build and solve sparse linearised system
-        A = sparse(Aᵢ, Aⱼ, Aᵥ, nrows, npar, +)
-        lsqr!(x, A, b; damp = S.damp, atol = S.atol, conlim = S.conlim, maxiter = S.maxiter, verbose = S.verbose, log = false)
+        A = sparse(Aᵢ, Aⱼ, Aᵥ, nrows, npar, +) # Sum repeated indices
+        lsqr!(x, A, b; damp = Solver.damp, atol = Solver.atol, conlim = Solver.conlim, maxiter = Solver.maxiter, verbose = Solver.verbose, log = false)
 
         # Update Parameters
-        update_parameters!(ΔM, x)
-        # Reset solution vector
-        fill!(x, zero(eltype(x)))
-
+        update_parameters!(PerturbationModel, x)
         # Update kernels
-        update_kernel!(K, ΔM, Obs)
+        update_kernel!(Kernels, PerturbationModel)
         
         # Re-evalute weighted sum of the squared resdiuals
-        b = zeros(nobs) # Reset b-vector
-        wssrₖ₊₁ = 0.0
-        for i in eachindex(K)
-            _, b[i] = evaluate_kernel(K[i], Obs[i])
-            wssrₖ₊₁ += b[i]^2
+        _, b = evaluate_kernel(Kernels)
+        wssr_l = sum(b -> b^2, b)
+        # Compute new fstat
+        fstat = wssr_k/wssr_l
+        # Check for divergence. For non-linear inversions the solution can bounce around once it reaches a minimum.
+        if fstat < 1.0
+            println("The LSQR solution diverged. Reverting to previous iteration.")
+            update_parameters!(PerturbationModel, -x)
+            update_kernel!(Kernels, PerturbationModel)
+            _, b = evaluate_kernel(Kernels)
+            wssr_l = sum(b -> b^2, b)
+            fstat = wssr_k/wssr_l
+            # This line search tends to not converge suggesting that the regularisation is controlling the gradient when
+            # the LSQR solution diverges.
+            # fstat, wssr_l, b = line_search!(x, PerturbationModel, Kernels, wssr_k, wssr_l; maxiter = 10, step_size = 0.5)
         end
 
-        # Compute new fstat
-        fstat = wssrₖ/wssrₖ₊₁
+        # Reset solution vector
+        fill!(x, 0.0)
+
         # Display fit summary for this iteration
         println("F-stat = ", string(fstat), " | F-crit = ", string(fcrit))
-        println("wssrₖ = ", string(wssrₖ), " | wssrₖ₊₁ = ", string(wssrₖ₊₁))
-        println("χ²ₖ = ", string(wssrₖ/nobs), " | ", "χ²ₖ₊₁ = ", string(wssrₖ₊₁/nobs), "\n")
+        println("wssrₖ₋₁ = ", string(wssr_k), " | wssrₖ = ", string(wssr_l))
+        println("χ²ₖ₋₁ = ", string(wssr_k/nobs), " | ", "χ²ₖ = ", string(wssr_l/nobs), "\n")
         # Update prior fit
-        wssrₖ = wssrₖ₊₁
+        wssr_k = wssr_l
 
         # Update iteration counter
         kiter += 1
     end
     # Update Model
-    update_model!(Model, ΔM)
+    update_model!(ForwardModel, PerturbationModel)
 
     return nothing
 end
+function line_search!(x, PerturbationModel, Kernels, wssr_k, wssr_l; maxiter = 10, step_size = 0.5)
+    niter = 0
+    fstat = wssr_k/wssr_l
+    while (fstat < 1.0) && (niter < maxiter)
+        # Basic line search to find a new minimum
+        x .*= step_size # Iteratively reduce perturbation vector by scalar
+        update_parameters!(PerturbationModel, -x) # Remove perturbations 
+        update_kernel!(Kernels, PerturbationModel)
+        _, b = evaluate_kernel(Kernels)
+        wssr_l = sum(b -> b^2, b)
+        fstat = wssr_k/wssr_l
+        niter += 1
 
-# Jacobian building functions
-function psi_build_jacobian(ΔM::SeismicPerturbationModel, Obs::Vector{<:Observable}, K::Vector{<:ObservableKernel}; Δi = 0)
+        println("F-stat = ", string(fstat))
+    end
+    if fstat < 1.0
+        println("Line search failed to converge. Reverting to previous iteration solution.")
+        # Remove remaining perturbations
+        update_parameters!(PerturbationModel, -x)
+        update_kernel!(Kernels, PerturbationModel)
+        _, b = evaluate_kernel(Kernels)
+        wssr_l = sum(b -> b^2, b)
+        fstat = wssr_k/wssr_l
+    end
+
+    return fstat, wssr_l, b
+end
+
+
+# JACOBIAN INDEXING ASSIGNMENTS
+
+# Assign Jacobian column indices to SeismicPerturbationalModel fields
+function assign_jacobian_indices!(PerturbationModel::SeismicPerturbationModel; jacobian_column = 0)
+    # Assign Jacobian indices to all fields in a Seismic Perturbation Model
+    # Each call to assign_jacobian_indices! updates and returns the Jacobian row counter
+    if ~isnothing(PerturbationModel.Velocity)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Velocity; jacobian_column = jacobian_column)
+    end
+    if ~isnothing(PerturbationModel.Interface)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Interface; jacobian_column = jacobian_column)
+    end
+    if ~isnothing(PerturbationModel.Hypocenter)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Hypocenter; jacobian_column = jacobian_column)
+    end
+    if ~isnothing(PerturbationModel.SourceStatics)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.SourceStatics; jacobian_column = jacobian_column)
+    end
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.ReceiverStatics; jacobian_column = jacobian_column)
+    end
+
+    # Return the total number of inversion parameters
+    return jacobian_column
+end
+# Assign Jacobian column indices to InverseSeismicVelocity fields
+function assign_jacobian_indices!(PerturbationModel::InverseSeismicVelocity; jacobian_column = 0)
+    if ~isnothing(PerturbationModel.Isotropic)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Isotropic, jacobian_column = jacobian_column)
+    end
+    if ~isnothing(PerturbationModel.Anisotropic)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Anisotropic, jacobian_column = jacobian_column)
+    end
+    # Return the total number of inversion parameters
+    return jacobian_column
+end
+# Assign Jacobian column indices to IsotropicSlowness fields
+function assign_jacobian_indices!(PerturbationModel::InverseIsotropicSlowness; jacobian_column = 0)
+    # Indices of P-slowness parameters
+    if ~isnothing(PerturbationModel.Up)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Up; jacobian_column = jacobian_column)
+    end
+    # Indices of S-slowness parameters
+    if ~isnothing(PerturbationModel.Us)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Us; jacobian_column = jacobian_column)
+    end
+
+    # Return the total number of inversion parameters
+    return jacobian_column
+end
+# Assign Jacobian column indices to InverseAnisotropicVector fields
+function assign_jacobian_indices!(PerturbationModel::InverseAnisotropicVector; jacobian_column = 0)
+    if ~isnothing(PerturbationModel.Orientations)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Orientations; jacobian_column = jacobian_column)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.Fractions; jacobian_column = jacobian_column)
+    end
+
+    return jacobian_column
+end
+# Assign Jacobian column indices to InverseAzRadVector fields
+function assign_jacobian_indices!(PerturbationModel::InverseAzRadVector; jacobian_column = 0)
+    # Inidces for the vectoral A-parameters
+    if ~isnothing(PerturbationModel.A)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.A; jacobian_column = jacobian_column)
+    end
+    # Inidces for the vectoral B-parameters
+    if ~isnothing(PerturbationModel.B)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.B; jacobian_column = jacobian_column)
+    end
+    # Inidces for the vectoral C-parameters
+    if ~isnothing(PerturbationModel.C)
+        jacobian_column = assign_jacobian_indices!(PerturbationModel.C; jacobian_column = jacobian_column)
+    end
+    # Return the total number of inversion parameters
+    return jacobian_column
+end
+# Assign Jacobian column indices to a ParameterField
+function assign_jacobian_indices!(PerturbationModel::ParameterField; jacobian_column = 0)
+    # Number of parameters is simply the number of nodes/elements in the mesh
+    num_params = length(PerturbationModel.Mesh)
+    PerturbationModel.jcol[1] = 1 + jacobian_column
+    PerturbationModel.jcol[2] = num_params + jacobian_column
+    # Add number of parameters in this field to the total
+    jacobian_column += num_params
+
+    # Return the total number of inversion parameters
+    return jacobian_column
+end
+# Assign Jacobian column indices to SeismicStatics
+function assign_jacobian_indices!(PerturbationModel::SeismicStatics; jacobian_column = 0)
+    # Loop over static keys
+    for k in eachindex(PerturbationModel.jcol)
+        # Increment jacobian index
+        jacobian_column += 1
+        # Assign index to key
+        PerturbationModel.jcol[k] = jacobian_column
+    end
+
+    # Return the total number of inversion parameters
+    return jacobian_column
+end
+
+
+
+# JACOBIAN BUILDING FUNCTIONS
+
+# Build Jacobian for all parameters in a SeismicPerturbationModel for a Vector of ObservableKernel
+function psi_build_jacobian(PerturbationModel::SeismicPerturbationModel, Kernels::Vector{<:ObservableKernel}; row_offset = 0)
     # Initialise storage arrays for linear system
     Aᵢ = Vector{Int}()
     Aⱼ = Vector{Int}()
     Aᵥ = Vector{Float64}()
 
-    if ~isnothing(ΔM.Velocity)
-        psi_jacobian!(Aᵢ, Aⱼ, Aᵥ, ΔM.Velocity, Obs, K; Δi = Δi)
+    if ~isnothing(PerturbationModel.Velocity)
+        psi_jacobian_block!(Aᵢ, Aⱼ, Aᵥ, PerturbationModel.Velocity, Kernels; row_offset = row_offset)
     end
-    if ~isnothing(ΔM.Interface)
+    if ~isnothing(PerturbationModel.Interface)
         error("Interface inversion not yet implemented.")
     end
-    if ~isnothing(ΔM.Hypocenter)
+    if ~isnothing(PerturbationModel.Hypocenter)
         error("Hypocenter inversion not yet implemented.")
     end
-    if ~isnothing(ΔM.SourceStatics)
-        psi_jacobian!(Aᵢ, Aⱼ, Aᵥ, ΔM.SourceStatics, Obs; Δi = Δi)
+    if ~isnothing(PerturbationModel.SourceStatics)
+        psi_jacobian_block!(Aᵢ, Aⱼ, Aᵥ, PerturbationModel.SourceStatics, Kernels; row_offset = row_offset)
     end
-    if ~isnothing(ΔM.ReceiverStatics)
-        error("Receiver static inversion not yet implemented.")
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        psi_jacobian_block!(Aᵢ, Aⱼ, Aᵥ, PerturbationModel.ReceiverStatics, Kernels; row_offset = row_offset)
     end
 
     return Aᵢ, Aⱼ, Aᵥ
 end
-
-# Build Jacobian Block for Isotropic Slowness Parameters
-function psi_jacobian!(Aᵢ, Aⱼ, Aᵥ, ΔM::IsotropicSlowness, Obs::Vector{<:Observable}, K::Vector{<:ObservableKernel}; Δi = 0)
+# Build a block of the Jacobian for a specific InversionParameter and a Vector of ObservableKernel
+function psi_jacobian_block!(Aᵢ, Aⱼ, Aᵥ, PerturbationModel::InversionParameter, Kernels::Vector{<:ObservableKernel}; row_offset = 0)
     # Loop over kernels
-    for i in eachindex(K)
+    for (i, iKernel) in enumerate(Kernels)
         # Differentiate observable kernel with respect to parameter field
-        j, ∂bᵢ∂mⱼ = psi_differentiate_kernel(ΔM, K[i], K[i].b)
-        # Weight partial by observation uncertainty
-        ∂bᵢ∂mⱼ ./= Obs[i].error
+        j, dbdm = psi_jacobian_row(PerturbationModel, iKernel)
         # Append to Jacobian
-        append!(Aᵢ, fill((i + Δi), length(j)))
+        foreach(_ -> push!(Aᵢ, i + row_offset), 1:length(j))
         append!(Aⱼ, j)
-        append!(Aᵥ, ∂bᵢ∂mⱼ)
+        append!(Aᵥ, dbdm)
+    end
+
+    return nothing
+end
+# Build a row of the Jacobian for a specific InversionParameter and a single ObservableKernel
+function psi_jacobian_row(PerturbationModel::InversionParameter, Kernel::ObservableKernel)
+    # Loop over elements in kernel
+    Wj = Vector{Int}()
+    Wv = Vector{Float64}()
+    for i in eachindex(Kernel.coordinates)
+        # Differentiate the kernel
+        psi_differentiate_kernel!(Wj, Wv, PerturbationModel, Kernel, i)
+    end
+    # Accumulate the weights
+    jcol, dbdm = accumlate_weights(Wj, Wv)
+    # Scale sensitivity by observation error
+    dbdm ./= Kernel.Observation.error
+
+    return jcol, dbdm
+end
+# Build a row of the Jacobian for SeismicStatics and a single ObservableKernel
+function psi_jacobian_row(PerturbationModel::SeismicStatics, Kernel::ObservableKernel)
+    # Dictionary key for static
+    static_type = typeof(PerturbationModel)
+    if static_type <: SeismicSourceStatics
+        k = (Kernel.Observation.source_id, nameof(typeof(Kernel.Observation)), nameof(typeof(Kernel.Observation.Phase)))
+    elseif static_type <: SeismicReceiverStatics
+        k = (Kernel.Observation.receiver_id, nameof(typeof(Kernel.Observation)), nameof(typeof(Kernel.Observation.Phase)))
+    else
+        error("Unrecognized static type!")
+    end
+
+    if haskey(PerturbationModel.jcol, k)
+        # Get Jacobian index
+        jcol = PerturbationModel.jcol[k]
+        # Static sensitivity is always 1
+        dbdm = 1.0/Kernel.Observation.error
+    else
+        println("No source static for key, ", k)
+    end
+
+    return jcol, dbdm
+end
+
+
+
+# PARTIAL DERIVATIVE FUNCTIONS
+
+# Differentiate an ObservableKernel with respect to InverseSeismicVelocity
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseSeismicVelocity, Kernel::ObservableKernel, index)
+    if ~isnothing(PerturbationModel.Isotropic)
+        psi_differentiate_kernel!(Wj, Wv, PerturbationModel.Isotropic, Kernel, index)
+    end
+
+    if ~isnothing(PerturbationModel.Anisotropic)
+        psi_differentiate_kernel!(Wj, Wv, PerturbationModel.Anisotropic, Kernel, index)
+    end
+
+    return nothing
+end
+# Differentiate an ObservableKernel with respect to InverseAnisotropicVector
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAnisotropicVector, Kernel::ObservableKernel, index)
+    if ~isnothing(PerturbationModel.Orientations)
+        psi_differentiate_kernel!(Wj, Wv, PerturbationModel.Orientations, Kernel, index)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        psi_differentiate_kernel!(Wj, Wv, PerturbationModel.Fractions, Kernel, index)
     end
 
     return nothing
 end
 
-# Observable Sensitivity: Isotropic slowness + Isotropic Velocity Model + Shear Travel Time
-function psi_differentiate_kernel(ΔM::IsotropicSlowness, K::ObservableKernel{<:IsotropicVelocity}, b::Type{<:TravelTime})
+# Differentiate IsotropicVelocity P-wave Travel-Time with respect to IsotropicSlowness
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:TravelTime{<:CompressionalWave}, <:IsotropicVelocity}, index)
+    if ~isnothing(PerturbationModel.Up)
+        # Kernel coordinates in perturbational mesh coordinate system
+        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Up.Mesh.Geometry)
+        # Map partial derivatives to inversion parameters. Travel-time slowness partial is simply the kernel weight distribued amongst the parameters.
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Up.Mesh, x_local, Kernel.weights[index].dr, PerturbationModel.Up.jcol[1])
+    end
 
-    # Get Jacobian index and mesh
-    if K.b <: TravelTime{<:CompressionalWave}
-        jcol = ΔM.up.jcol[1] - 1
-        Mesh = ΔM.up.Mesh
-    elseif K.b <: TravelTime{<:ShearWave}
-        jcol = ΔM.us.jcol[1] - 1
-        Mesh = ΔM.us.Mesh
+    return nothing
+end
+# Differentiate IsotropicVelocity S-wave Travel-Time with respect to IsotropicSlowness
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:TravelTime{<:ShearWave}, <:IsotropicVelocity}, index)
+    if PerturbationModel.coupling_option == 0
+        # Inversion for S-slowness
+        dtdm = Kernel.weights[index].dr
+    elseif PerturbationModel.coupling_option == 1
+        # Sensitivity to P-slowness
+        # Kernel coordinates in P-slowness mesh
+        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Up.Mesh.Geometry)
+        # Estimate P-slowness at kernel coordinate for current iteration
+        up = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.m0, x_local; tf_extrapolate = false, tf_harmonic = false)
+        up += linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.dm, x_local; tf_extrapolate = false, tf_harmonic = false)
+        # Compute sensitivity to P-slowness
+        dtdm = Kernel.weights[index].dr/(up*Kernel.Parameters.vs[index])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Up.Mesh, x_local, dtdm, PerturbationModel.Up.jcol[1])
+
+        # Sensitivity to S-to-P slowness ratio
+        dtdm = up*Kernel.weights[index].dr
     else
-        error("Unrecognized kernel observable "*string(K.b)*".")
+        error("Unrecognized couplinf option!")
     end
 
-    # Allocate storage array for the partials
-    T = eltype(K.q₀) # Assume same element type for partials as for static
-    n = length(K.w) # Number of partials
-    Wj = Array{Int}(undef, n, 8) # Parameter jacobian index
-    Wv = Array{T}(undef, n, 8) # Parameter sensitivity weights, 8 per node
-    # Loop over elements in kernel
-    for i in eachindex(K.x)
-        # Convert to inversion field coordinates
-        kx₁, kx₂, kx₃ = global_to_local(K.x[i][1], K.x[i][2], K.x[i][3], Mesh.CS)
-        # Map partial derivative to inversion parameter. Travel-time slowness partial is simply the kernel weight.
-        j, v = get_weights(Mesh, kx₁, kx₂, kx₃, K.w[i]; Δi = jcol)
-        # Store jacobian indices and values
-        Wj[i,:] .= j
-        Wv[i,:] .= v
+    # Sensitivity to S-slowness or S-to-P slowness ratio
+    if ~isnothing(PerturbationModel.Us)
+        # Kernel coordinates in perturbational mesh coordinate system
+        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Us.Mesh.Geometry)
+        # Map partial derivatives to inversion parameters. Travel-time slowness partial is simply the kernel weight distribued amongst the parameters.
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local, dtdm, PerturbationModel.Us.jcol[1])
     end
-    # Accumulate the weights
-    jm, ∂t∂m = accumlate_weights(Wj, Wv)
 
-    return jm, ∂t∂m
+    return nothing
 end
 
-# Map sensitivities to Jacobian
-function get_weights(Mesh::RegularGrid, qx₁, qx₂, qx₃, w; Δi = 0)
-    # Return trilinear interpolation weights
-    wi, wv = trilinear_weights(Mesh.x[1], Mesh.x[2], Mesh.x[3], qx₁, qx₂, qx₃; tf_extrapolate = false, scale = w)
-    # Apply shift to index
-    wj = (wi[1] + Δi, wi[2] + Δi, wi[3] + Δi, wi[4] + Δi, wi[5] + Δi, wi[6] + Δi, wi[7] + Δi, wi[8] + Δi)
-    return wj, wv
+# Differentiate HexagonalVectoralVelocity P-wave Travel-Time with respect to IsotropicSlowness
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:TravelTime{<:CompressionalWave}, <:HexagonalVectoralVelocity}, index)
+    if ~isnothing(PerturbationModel.Up)
+        # qP-phase velocity
+        vqp = kernel_phase_velocity(Kernel.Observation.Phase, Kernel, index)
+        # Isotropic P-velocity
+        vip, _ = return_isotropic_velocities(Kernel.Parameters, index)
+        # Isotropic slowness derivative
+        dtdu = Kernel.weights[index].dr*(vip/vqp)
+        # Kernel coordinates in perturbational mesh coordinate system
+        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Up.Mesh.Geometry)
+        # Map partial derivatives to inversion parameters
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Up.Mesh, x_local, dtdu, PerturbationModel.Up.jcol[1])
+    end
+
+    return nothing
+end
+# Differentiate HexagonalVectoralVelocity P-wave Travel-Time with respect to InverseAzRadVector
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector, Kernel::ObservableKernel{<:TravelTime{<:CompressionalWave}, <:HexagonalVectoralVelocity}, index)
+    # Currently assuming anisotropic parameters are all defined on the same mesh
+    if (PerturbationModel.A.Mesh.Geometry != PerturbationModel.B.Mesh.Geometry) ||
+        (PerturbationModel.A.Mesh.Geometry != PerturbationModel.C.Mesh.Geometry)
+        error("Mesh Geometry for InverseHexagonalVector_VF2021 must be equivalent")
+    end
+    # Coordinate System Conversions
+    x_global = Kernel.coordinates[index]
+    x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
+    x_geo = global_to_geographic(x_global[1], x_global[2], x_global[3]; radius = PerturbationModel.A.Mesh.Geometry.R₀)
+    # Propagation and symmetry axis orientations in the local coordinate system
+    # The AzRad-Vector is always defined with respect to the plane tanget to the Earth's surface at a given point
+    pazm, pelv = global_to_local_angles(Kernel.weights[index].azimuth, Kernel.weights[index].elevation, x_geo, PerturbationModel.A.Mesh.Geometry) # Propagation direction
+    sazm, selv = global_to_local_angles(Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], x_geo, PerturbationModel.A.Mesh.Geometry) # Symmetry axis
+
+    # Extract relevant parameters
+    α = Kernel.Parameters.α[index] # Reference symmetry axis velocity
+    f = Kernel.Parameters.f[index] # Anisotropic strength
+    vqp = kernel_phase_velocity(Kernel.Observation.Phase, Kernel, index) # qP-phase velocity
+    vip, _ = return_isotropic_velocities(Kernel.Parameters, index) # Isotropic P-velocity
+    rϵ, rη, _ = return_anisotropic_ratios(Kernel.Parameters, index) # Thomsen parameter ratios
+    # Cosine of angle between propagation direction annd symmetry axis
+    cosθ = symmetry_axis_cosine(sazm, selv, pazm, pelv)
+    cosθ_2, cosθ_4 = (cosθ^2, cosθ^4)
+
+    # qP-phase velocity partial derivatives
+    dαdf = -(2/15)*((α^3)/(vip^2))*(5.0*rϵ - rη)
+    dsdA, dsdB, dsdC = differentiate_symmetry_axis_product(pazm, pelv, sazm, selv, f)
+    dfdA, dfdB, dfdC = differentiate_anisotropic_strength(sazm, selv, f)
+    dvdA = α*( (rϵ - rη*cosθ_4)*dfdA - (rϵ + rη - 2.0*rη*cosθ_2)*dsdA ) + dαdf*dfdA*(vqp/α)
+    dvdB = α*( (rϵ - rη*cosθ_4)*dfdB - (rϵ + rη - 2.0*rη*cosθ_2)*dsdB ) + dαdf*dfdB*(vqp/α)
+    dvdC = α*( (rϵ - rη*cosθ_4)*dfdC - (rϵ + rη - 2.0*rη*cosθ_2)*dsdC ) + dαdf*dfdC*(vqp/α)
+    # Use second-order perturbation to approximate ∂v/∂C when anisotropy is near zero
+    # Δv/Δc ≈ (∂v/∂C) + 0.5*(∂²v/∂C²)*ΔC
+    if abs(f*rϵ) < 0.0001
+        Δf = abs(0.001/rϵ)
+        ΔC = sqrt(Δf)
+        dvdC = ΔC*( α*( (rϵ - rη*cosθ_4) - (rϵ + rη - 2.0*rη*cosθ_2)*(sin(pelv)^2) ) + dαdf )
+    end
+    # Chain rule to get travel-time partial derivative; ∂t/∂m = (∂t/∂u)*(∂u/∂v)*(∂v/∂m)
+    dtdu = Kernel.weights[index].dr
+    dtdv = -dtdu/(vqp^2)
+    dtdA, dtdB, dtdC = (dtdv*dvdA, dtdv*dvdB, dtdv*dvdC)
+
+    # Map partial derivatives to inversion parameters
+    if x_geo[3] > -500.0 # Squeezing!
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.A.Mesh, x_local, dtdA, PerturbationModel.A.jcol[1])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.B.Mesh, x_local, dtdB, PerturbationModel.B.jcol[1])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.C.Mesh, x_local, dtdC, PerturbationModel.C.jcol[1])
+    end
+
+    return nothing
+end
+# Compute the partial derivatives ∂(fcos²x)/∂m for m = (A, B, C) where f is the anisotropic magnitude and x is
+# the angle between the propagation direction and symmetry axis; Equations A37-A39 of VanderBeek et al. (GJI 2023)
+function differentiate_symmetry_axis_product(ray_azm, ray_elv, sym_azm, sym_elv, f)
+    # Compute angle cosines and sines
+    sinϕ, cosϕ = sincos(ray_azm)
+    sinθ, cosθ = sincos(ray_elv)
+    sinψ, cosψ = sincos(sym_azm)
+    sinλ, cosλ = sincos(sym_elv)
+    # Trigonometric identities
+    cos2ϕ = 2.0*(cosϕ^2) - 1.0
+    sin2ϕ = 2.0*sinϕ*cosϕ
+    sin2θ = 2.0*sinθ*cosθ
+    cos2ψ = 2.0*(cosψ^2) - 1.0
+    sin2ψ = 2.0*sinψ*cosψ
+    # Define tanλ such that it does not go to infinity
+    e = 64 # Increase 'k', increase max amplitude and roll-off of tangent discontinuity
+    k = 0.5*pi
+    λ = atan(sinλ/cosλ) # Place on interval [-pi/2,pi/2]
+    λ = (2*((k^e)/((k^e) + (λ^e))) - 1)*λ
+    tanλ = tan(λ)
+    # Partial derivatives with respect to the azimuthal and vertical components
+    # Equations A37-A39 of VanderBeek et al. (GJI 2023)
+    dsdA = (cos2ϕ + cos2ψ)*(cosθ^2) + (cosϕ*cosψ - sinϕ*sinψ)*tanλ*sin2θ
+    dsdB = (sin2ϕ + sin2ψ)*(cosθ^2) + (sinϕ*cosψ + cosϕ*sinψ)*tanλ*sin2θ
+    dsdC = sqrt(f)*( 4.0*sinλ*(sinθ^2) + 2.0*(cosϕ*cosψ + sinϕ*sinψ)*cosλ*sin2θ )
+    # Note the factor of 0.5! A factor of 2 was included in Eq. A37-A39 that we do not want here
+    return 0.5*dsdA, 0.5*dsdB, 0.5*dsdC
+end
+# Compute the partial derivatives ∂f/∂m for m = (A, B, C) where the anisotropic magnitude, f = √(A² + B²) + C²
+# Equations A33-A34 of VanderBeek et al. (GJI 2023)
+function differentiate_anisotropic_strength(sym_azm, sym_elv, f)
+    # Equations A33-A34 of VanderBeek et al. (GJI 2023)
+    sin2ψ, cos2ψ = sincos(2.0*sym_azm)
+    return cos2ψ, sin2ψ, 2.0*sqrt(f)*sin(sym_elv)
 end
 
-# Accumulates weights
+# Maps Sensitivity (i.e. observation partial derivative) to the appropriate Jacobian columns
+function map_partial_to_jacobian!(Wj, Wv, Mesh::RegularGrid{G, 3}, x::NTuple{3, T}, dbdm, col_offset) where {G,T}
+    mesh_index, weights = trilinear_weights(Mesh.x[1], Mesh.x[2], Mesh.x[3], x[1], x[2], x[3]; tf_extrapolate = false, scale = dbdm)
+    for n in eachindex(mesh_index)
+        push!(Wj, mesh_index[n] + col_offset - 1)
+        push!(Wv, weights[n])
+    end
+
+    return nothing
+end
+# Accumulates weights for repeated indices
 function accumlate_weights(Wn, Wv)
     # Unique indices in Wn
     n = sort(vec(Wn))
@@ -188,155 +680,96 @@ function accumlate_weights(Wn, Wv)
     return n, v
 end
 
-# Build Jacobian Block for Seismic Source Statics
-function psi_jacobian!(Aᵢ, Aⱼ, Aᵥ, ΔM::SeismicSourceStatics, Obs::Vector{<:Observable}; Δi = 0)
-    # Loop over observations
-    for (i, b) in enumerate(Obs)
-        # Dictionary key for static
-        k = (b.source_id, nameof(typeof(b)), nameof(typeof(b.phase)))
-        if haskey(ΔM.jcol, k)
-            # Get Jacobian index
-            j = ΔM.jcol[k]
-            # Append to Jacobian
-            append!(Aᵢ, i + Δi)
-            append!(Aⱼ, j)
-            append!(Aᵥ, 1.0/Obs[i].error) # Static sensitivity is always 1
-        else
-            println("No source static for key, ", k)
-        end
+
+
+# ASSIGN PARAMETER SENSITIVITIES
+# This is a realtive measure how well-samped is a parameter and is defined as
+# the row-sum of the Jacobian-squared (RJSJ), specifically,
+#   xⱼ = (∂b₁/∂mⱼ)² + (∂b₂/∂mⱼ)² + ... + (∂bₙ/∂mⱼ)²
+# where mⱼ is the jᵗʰ-parameter and bᵢ is the iᵗʰ-observation.
+
+# Assign RSJS for all parameters in a SeismicPerturbationModel
+function fill_rsjs!(PerturbationModel::SeismicPerturbationModel, x)
+
+    if ~isnothing(PerturbationModel.Velocity)
+        fill_rsjs!(PerturbationModel.Velocity, x)
     end
-
-    return nothing
-end
-
-
-
-# Assigns Jacobian index to a ParameterField
-function assign_jacobian_indices!(ΔM::SeismicPerturbationModel; jcol = 0)
-    # Assign Jacobian indices to all fields in a Seismic Perturbation Model
-    # Each call to assign_jacobian_indices! updates and returns the Jacobian row counter
-    if ~isnothing(ΔM.Velocity)
-        jcol = assign_jacobian_indices!(ΔM.Velocity; jcol = jcol)
-    end
-    if ~isnothing(ΔM.Interface)
-        jcol = assign_jacobian_indices!(ΔM.Interface; jcol = jcol)
-    end
-    if ~isnothing(ΔM.Hypocenter)
-        jcol = assign_jacobian_indices!(ΔM.Hypocenter; jcol = jcol)
-    end
-    if ~isnothing(ΔM.SourceStatics)
-        jcol = assign_jacobian_indices!(ΔM.SourceStatics; jcol = jcol)
-    end
-    if ~isnothing(ΔM.ReceiverStatics)
-        jcol = assign_jacobian_indices!(ΔM.ReceiverStatics; jcol = jcol)
-    end
-
-    return jcol
-end
-
-function assign_jacobian_indices!(ΔM::IsotropicSlowness; jcol = 0)
-
-    # Indices of P-slowness parameters
-    if ~isnothing(ΔM.up)
-        m = length(ΔM.up.Mesh)
-        ΔM.up.jcol[1] = 1 + jcol
-        ΔM.up.jcol[2] = m + jcol
-        jcol += m
-    end
-    # Indices of S-slowness parameters
-    if ~isnothing(ΔM.us)
-        m = length(ΔM.us.Mesh)
-        ΔM.us.jcol[1] = 1 + jcol
-        ΔM.us.jcol[2] = m + jcol
-        jcol += m
-    end
-
-    return jcol
-end
-
-function assign_jacobian_indices!(ΔM::SeismicStatics; jcol = 0)
-    # Loop over static keys
-    for k in eachindex(ΔM.jcol)
-        # Increment jacobian index
-        jcol += 1
-        # Assign index to key
-        ΔM.jcol[k] = jcol
-    end
-
-    return jcol
-end
-
-
-
-function fill_rsjs!(ΔM::SeismicPerturbationModel, x)
-
-    if ~isnothing(ΔM.Velocity)
-        fill_rsjs!(ΔM.Velocity, x)
-    end
-    if ~isnothing(ΔM.Interface)
+    if ~isnothing(PerturbationModel.Interface)
         error("Interface RSJS not yet defined.")
     end
-    if ~isnothing(ΔM.Hypocenter)
+    if ~isnothing(PerturbationModel.Hypocenter)
         error("Hypocenter RSJS not yet defined.")
     end
-    if ~isnothing(ΔM.SourceStatics)
-        fill_rsjs!(ΔM.SourceStatics, x)
+    if ~isnothing(PerturbationModel.SourceStatics)
+        fill_rsjs!(PerturbationModel.SourceStatics, x)
     end
-    if ~isnothing(ΔM.ReceiverStatics)
-        fill_rsjs!(ΔM.ReceiverStatics, x)
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        fill_rsjs!(PerturbationModel.ReceiverStatics, x)
     end
 
     return nothing
 end
+# Assign RSJS for all parameters in a InverseSeismicVelocity
+function fill_rsjs!(PerturbationModel::InverseSeismicVelocity, x)
+    if ~isnothing(PerturbationModel.Isotropic)
+        fill_rsjs!(PerturbationModel.Isotropic, x)
+    end
+    if ~isnothing(PerturbationModel.Anisotropic)
+        fill_rsjs!(PerturbationModel.Anisotropic, x)
+    end
 
-function fill_rsjs!(ΔM::IsotropicSlowness, x)
+    return nothing
+end
+# Assign RSJS for all parameters in a InverseIsotropicSlowness
+function fill_rsjs!(PerturbationModel::InverseIsotropicSlowness, x)
     # Update P-wave Slowness Sensitivities (if not empty)
-    if ~isnothing(ΔM.up)
-        fill_inversion_field!(ΔM.up.RSJS, x, ΔM.up.jcol)
+    if ~isnothing(PerturbationModel.Up)
+        fill_rsjs!(PerturbationModel.Up, x)
     end
-
     # Update S-wave Slowness Sensitivities (if not empty)
-    if ~isnothing(ΔM.us)
-        fill_inversion_field!(ΔM.us.RSJS, x, ΔM.us.jcol)
+    if ~isnothing(PerturbationModel.Us)
+        fill_rsjs!(PerturbationModel.Us, x)
     end
 
     return nothing
 end
+# Assign RSJS for all parameters in a InverseAnisotropicVector
+function fill_rsjs!(PerturbationModel::InverseAnisotropicVector, x)
+    if ~isnothing(PerturbationModel.Orientations)
+        fill_rsjs!(PerturbationModel.Orientations, x)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        fill_rsjs!(PerturbationModel.Fractions, x)
+    end
 
-function fill_rsjs!(ΔM::SeismicStatics, x)
+    return nothing
+end
+# Assign RSJS for all parameters in a InverseIsotropicSlowness
+function fill_rsjs!(PerturbationModel::InverseAzRadVector, x)
+    if ~isnothing(PerturbationModel.A)
+        fill_rsjs!(PerturbationModel.A, x)
+    end
+    if ~isnothing(PerturbationModel.B)
+        fill_rsjs!(PerturbationModel.B, x)
+    end
+    if ~isnothing(PerturbationModel.C)
+        fill_rsjs!(PerturbationModel.C, x)
+    end
+
+    return nothing
+end
+# Assign RSJS for a ParameterField
+function fill_rsjs!(PerturbationModel::ParameterField, x)
+    N = 1 + PerturbationModel.jcol[2] - PerturbationModel.jcol[1]
+    copyto!(PerturbationModel.RSJS, 1, x, PerturbationModel.jcol[1], N)
+
+    return nothing
+end
+# Assign RSJS for all SeismicStatics
+function fill_rsjs!(PerturbationModel::SeismicStatics, x)
     # Loop over keys and extract Jacobian element
-    for k in eachindex(ΔM.jcol)
-        ΔM.RSJS[k] = x[ΔM.jcol[k]]
-    end
-
-    return nothing
-end
-
-function root_mean_rsjs(J; δJ = 0.0)
-    g = zero(eltype(J))
-    n = 0
-    for i in eachindex(J)
-        if J[i] > δJ
-            g += J[i]
-            n += 1
-        end
-    end
-    # Check for non-null sensitivity
-    if n > 0
-        g /= n
-    else
-        g = 1.0
-    end
-
-    return sqrt(g)
-end
-
-# Convenient function to loop over Jacobian indices
-function fill_inversion_field!(f, x, jx)
-    k = 0
-    for i in jx[1]:jx[2]
-        k += 1
-        f[k] = x[i]
+    for k in eachindex(PerturbationModel.jcol)
+        PerturbationModel.RSJS[k] = x[PerturbationModel.jcol[k]]
     end
 
     return nothing
@@ -344,573 +777,923 @@ end
 
 
 
-function update_parameters!(ΔM::SeismicPerturbationModel, x)
-    if ~isnothing(ΔM.Velocity)
-        update_parameters!(ΔM.Velocity, x)
+# BUILD CONSTRAINT EQUATIONS
+
+# Build constraint equations for all parameters in a SeismicPerturbationModel
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::SeismicPerturbationModel; row_offset = 0, tf_jac_scale = false)
+    if ~isnothing(PerturbationModel.Velocity)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Velocity; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
     end
-    if ~isnothing(ΔM.Interface)
-        error("Interface parameter update not yet defined.")
-    end
-    if ~isnothing(ΔM.Hypocenter)
-        error("Hypocenter parameter update not yet defined.")
-    end
-    if ~isnothing(ΔM.SourceStatics)
-        update_parameters!(ΔM.SourceStatics, x)
-    end
-    if ~isnothing(ΔM.ReceiverStatics)
-        update_parameters!(ΔM.ReceiverStatics, x)
-    end
-
-    return nothing
-end
-
-function update_parameters!(ΔM::IsotropicSlowness, x)
-    if ~isnothing(ΔM.up)
-        fill_inversion_field!(ΔM.up.δm, x, ΔM.up.jcol)
-        # Cummulative Perturbations
-        ΔM.up.Δm .+= ΔM.up.δm
-    end
-
-    if ~isnothing(ΔM.us)
-        fill_inversion_field!(ΔM.us.δm, x, ΔM.us.jcol)
-        ΔM.us.Δm .+= ΔM.us.δm
-    end
-
-    return nothing
-end
-
-function update_parameters!(ΔM::SeismicStatics, x)
-    for k in eachindex(ΔM.jcol)
-        ΔM.δm[k] = x[ΔM.jcol[k]]
-        ΔM.Δm[k] += x[ΔM.jcol[k]]
-    end
-
-    return nothing
-end
-
-
-function update_kernel!(K::Vector{<:ObservableKernel}, ΔM::SeismicPerturbationModel, Obs::Vector{<:Observable})
-    if ~isnothing(ΔM.Velocity)
-        update_kernel!(K, ΔM.Velocity)
-    end
-    if ~isnothing(ΔM.Interface)
-        error("Interface kernel update not yet defined.")
-    end
-    if ~isnothing(ΔM.Hypocenter)
-        error("Hypocenter kernel update not yet defined.")
-    end
-    if ~isnothing(ΔM.ReceiverStatics)
-        update_kernel!(K, ΔM.ReceiverStatics, Obs)
-    end
-    if ~isnothing(ΔM.SourceStatics)
-        update_kernel!(K, ΔM.SourceStatics, Obs)
-    end
-
-    return nothing
-end
-
-function update_kernel!(K::Vector{<:ObservableKernel}, ΔM::InversionParameter)
-    for i in eachindex(K)
-        update_kernel!(K[i], ΔM)
-    end
-
-    return nothing
-end
-
-function update_kernel!(K::ObservableKernel{<:IsotropicVelocity,}, ΔM::IsotropicSlowness)
-    if ~isnothing(K.m.vp) && ~isnothing(ΔM.up)
-        for (i, xq) in enumerate(K.x)
-            # Map global kernel coordinates to local
-            kx₁, kx₂, kx₃ = global_to_local(xq[1], xq[2], xq[3], ΔM.up.Mesh.CS)
-            # Interpolate the slowness perturbations to the kernel
-            δu = linearly_interpolate(ΔM.up.Mesh.x[1], ΔM.up.Mesh.x[2], ΔM.up.Mesh.x[3], ΔM.up.δm, kx₁, kx₂, kx₃;
-            tf_extrapolate = false, tf_harmonic = false)
-            # Prior kernel slowness
-            up = 1.0/K.m.vp[i]
-            # Updated kernel slowness
-            K.m.vp[i] = 1.0/(up + δu)
-        end
-    end
-
-    if ~isnothing(K.m.vs) && ~isnothing(ΔM.us)
-        for (i, xq) in enumerate(K.x)
-            # Map global kernel coordinates to local
-            kx₁, kx₂, kx₃ = global_to_local(xq[1], xq[2], xq[3], ΔM.us.Mesh.CS)
-            # Interpolate the slowness perturbations to the kernel
-            δu = linearly_interpolate(ΔM.us.Mesh.x[1], ΔM.us.Mesh.x[2], ΔM.us.Mesh.x[3], ΔM.us.δm, kx₁, kx₂, kx₃;
-            tf_extrapolate = false, tf_harmonic = false)
-            # Prior kernel slowness
-            us = 1.0/K.m.vs[i]
-            # Updated kernel slowness
-            K.m.vs[i] = 1.0/(us + δu)
-        end
-    end
-
-    return nothing
-end
-
-function update_kernel!(K::Vector{<:ObservableKernel}, ΔM::InversionParameter, Obs::Vector{<:Observable})
-    for i in eachindex(K)
-        update_kernel!(K[i], ΔM, Obs[i])
-    end
-
-    return nothing
-end
-
-function update_kernel!(K::ObservableKernel, ΔM::SeismicSourceStatics, b::Observable)
-    kiop = (b.source_id, nameof(typeof(b)), nameof(typeof(b.phase)))
-    if haskey(ΔM.δm, kiop)
-        K.q₀[1] += ΔM.δm[kiop]
-    end
-
-    return nothing
-end
-
-
-
-function update_model!(Model::AbstractModel, ΔM::SeismicPerturbationModel)
-    if ~isnothing(ΔM.Velocity)
-        update_model!(Model, ΔM.Velocity)
-    end
-    if ~isnothing(ΔM.Interface)
-        error("Interface model update not yet defined.")
-    end
-    if ~isnothing(ΔM.Hypocenter)
-        error("Hypocenter model update not yet defined.")
-    end
-    if ~isnothing(ΔM.SourceStatics)
-        update_model!(Model, ΔM.SourceStatics)
-    end
-    if ~isnothing(ΔM.ReceiverStatics)
-        update_model!(Model, ΔM.ReceiverStatics)
-    end
-
-    return nothing
-end
-
-# MODEL UPDATES ARE ADDING TOTAL PERTURBATION!
-# The Δm fields are the cumulative inner non-linear perturbations
-# The δm fields are the incremental inner non-linear (i.e. non-linear) perturbations
-# For multiple ray tracing iterations (i.e. outer non-linear loop), we will need to
-# reset Δm at each outer iteration. Otherwise, we will be adding the same perturbations
-# mulitple times.
-function update_model!(Model::ModelTauP{<:IsotropicVelocity,}, ΔM::IsotropicSlowness)
-    # Update P-wave Slowness (if not empty)
-    if ~isnothing(ΔM.up)
-        # Map perturbations to model
-        for (k, qx₃) in enumerate(Model.Mesh.x[3])
-            # Radial TauP depth
-            rq = Model.Rₜₚ - ΔM.up.Mesh.CS.R₀ - qx₃
-            # Reference slowness at this depth
-            uq = piecewise_linearly_interpolate(Model.r, Model.nd, Model.vp, rq; tf_extrapolate = true, tf_harmonic = true)
-            uq = 1.0/uq
-            # Loop over remaining nodes and update P-wave velocity perturbation
-            for (i, qx₁) in enumerate(Model.Mesh.x[1]), (j, qx₂) in enumerate(Model.Mesh.x[2])
-                Δu = linearly_interpolate(ΔM.up.Mesh.x[1], ΔM.up.Mesh.x[2], ΔM.up.Mesh.x[3], ΔM.up.Δm, qx₁, qx₂, qx₃;
-                     tf_extrapolate = false, tf_harmonic = false)
-                # Add velocity perturbation to model
-                Model.m.vp[i, j, k] += (1.0/(uq + Δu)) - (1.0/uq)
-            end
-        end
-    end
-
-    # Update S-wave Slowness (if not empty)
-    if ~isnothing(ΔM.us)
-        # Map perturbations to model
-        for (k, qx₃) in enumerate(Model.Mesh.x[3])
-            # Radial TauP depth
-            rq = Model.Rₜₚ - ΔM.us.Mesh.CS.R₀ - qx₃
-            # Reference slowness
-            uq = piecewise_linearly_interpolate(Model.r, Model.nd, Model.vs, rq; tf_extrapolate = true, tf_harmonic = true)
-            uq = 1.0/uq
-            # Loop over remaining nodes and update S-wave velocity perturbation
-            for (i, qx₁) in enumerate(Model.Mesh.x[1]), (j, qx₂) in enumerate(Model.Mesh.x[2])
-                Δu = linearly_interpolate(ΔM.us.Mesh.x[1], ΔM.us.Mesh.x[2], ΔM.us.Mesh.x[3], ΔM.us.Δm, qx₁, qx₂, qx₃;
-                     tf_extrapolate = false, tf_harmonic = false)
-                # Add velocity perturbation to model
-                Model.m.vs[i, j, k] += (1.0/(uq + Δu)) - (1.0/uq)
-            end
-        end
-    end
-
-    return nothing
-end
-
-function update_model!(Model::AbstractModel, ΔM::SeismicSourceStatics)
-    for k in eachindex(ΔM.Δm)
-        if haskey(Model.Sources.static, k)
-            # Accumulate static
-            Model.Sources.static[k] += ΔM.Δm[k]
-        else
-            # Add static
-            Model.Sources.static[k] = ΔM.Δm[k]
-        end
-    end
-
-    return nothing
-end
-
-function update_model!(Model::AbstractModel, ΔM::SeismicReceiverStatics)
-    for k in eachindex(ΔM.Δm)
-        if haskey(Model.Receivers.static, k)
-            Model.Receivers.static[k] += ΔM.Δm[k]
-        else
-            Model.Receivers.static[k] = ΔM.Δm[k]
-        end
-    end
-
-    return nothing
-end
-
-
-
-# Build Constraint Equations
-function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔM::SeismicPerturbationModel; Δi = 0, tf_jac_scale = false)
-    if ~isnothing(ΔM.Velocity)
-        Δi = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔM.Velocity; Δi = Δi, tf_jac_scale = tf_jac_scale)
-    end
-    if ~isnothing(ΔM.Interface)
+    if ~isnothing(PerturbationModel.Interface)
         error("Interface regularisation not yet defined.")
     end
-    if ~isnothing(ΔM.Hypocenter)
+    if ~isnothing(PerturbationModel.Hypocenter)
         error("Hypocenter regularisation not yet defined.")
     end
-    if ~isnothing(ΔM.SourceStatics)
-        Δi = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔM.SourceStatics; Δi = Δi) # No Jacobian scaling for statics
+    if ~isnothing(PerturbationModel.SourceStatics)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.SourceStatics; row_offset = row_offset) # No Jacobian scaling for statics
     end
-    if ~isnothing(ΔM.ReceiverStatics)
-        Δi = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔM.ReceiverStatics; Δi = Δi) # No Jacobian scaling for statics
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.ReceiverStatics; row_offset = row_offset) # No Jacobian scaling for statics
     end
 
-    return Δi
+    # Return row index of the last constraint equation
+    return row_offset
 end
-
-function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔM::SeismicStatics; Δi = 0)
-    # Loop over static keys
-    for kj in eachindex(ΔM.jcol)
-        # Define the damping parameter key
-        ki = (kj[2], kj[3])
-        # Define the constraint if the damping is > 0
-        if ΔM.μ[ki] > 0.0
-            Δi += 1 # Increment row counter
-            j = ΔM.jcol[kj] # Jacobian index
-            w = ΔM.μ[ki]/ΔM.σ[kj] # Define the weight
-            # Append constraint
-            push!(Aᵢ, Δi)
-            push!(Aⱼ, j)
-            push!(Aᵥ, w)
-            # Constraint value
-            if ΔM.tf_jump
-                δm = ΔM.μ[ki]*ΔM.Δm[kj]/ΔM.σ[kj]
-                push!(b, -δm)
-            else
-                push!(b, 0.0)
-            end
-        end
+# Build constraint equations for all parameters in a InverseSeismicVelocity
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::InverseSeismicVelocity; row_offset = 0, tf_jac_scale = false)
+    if ~isnothing(PerturbationModel.Isotropic)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Isotropic; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
     end
-
-    return Δi
+    if ~isnothing(PerturbationModel.Anisotropic)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Anisotropic; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
+    end
+    # Return row index of the last constraint equation
+    return row_offset
 end
-
-function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔU::IsotropicSlowness; Δi = 0, tf_jac_scale = false)
+# Build constraint equations for all parameters in a InverseIsotropicSlowness
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::InverseIsotropicSlowness; row_offset = 0, tf_jac_scale = false)
 
     # P-slowness
-    if ~isnothing(ΔU.up) && isnothing(ΔU.us)
-        Δj = (ΔU.up.jcol[1] - 1)
-        Δi = build_spatial_contraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔU.up.Mesh, ΔU.up.Δm, ΔU.up.m₀, ΔU.up.σₘ, ΔU.up.μ[1], ΔU.up.μjump[1],
-        ΔU.up.λ, ΔU.up.λjump[1], ΔU.up.RSJS; tf_jac_scale = tf_jac_scale, Δi = Δi, Δj = Δj)
+    if ~isnothing(PerturbationModel.Up) && (PerturbationModel.coupling_option < 2)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Up; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
     end
-
     # S-slowness
-    if ~isnothing(ΔU.us) && isnothing(ΔU.up)
-        Δj = (ΔU.us.jcol[1] - 1)
-        Δi = build_spatial_contraints!(Aᵢ, Aⱼ, Aᵥ, b, ΔU.us.Mesh, ΔU.us.Δm, ΔU.us.m₀, ΔU.us.σₘ, ΔU.us.μ[1], ΔU.us.μjump[1],
-        ΔU.us.λ, ΔU.us.λjump[1], ΔU.us.RSJS; tf_jac_scale = tf_jac_scale, Δi = Δi, Δj = Δj)
+    if ~isnothing(PerturbationModel.Us) && (PerturbationModel.coupling_option < 2)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Us; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
     end
-
     # Joint Inversion
-    if ~isnothing(ΔU.up) && ~isnothing(ΔU.us)
+    if (PerturbationModel.coupling_option > 1) && ~isnothing(ΔU.up) && ~isnothing(ΔU.us)
         error("Missing Coupling Constraints.")
+        # row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Up, PerturbationModel.Us; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
     end
 
-    return Δi
+    # Return row index of the last constraint equation
+    return row_offset
 end
+# Build constraint equations for all parameters in a InverseAnisotropicVector
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::InverseAnisotropicVector; row_offset = 0, tf_jac_scale = false)
+    if ~isnothing(PerturbationModel.Orientations)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Orientations; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        row_offset = build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel.Fractions; row_offset = row_offset, tf_jac_scale = tf_jac_scale)
+    end
 
-# Constraints for spatially discretised variables
-function build_spatial_contraints!(Aᵢ, Aⱼ, Aᵥ, b, Mesh, Δm, m₀, σₘ, μ, μjump, λ, λjump, rsjs; tf_jac_scale = false, Δi = 0, Δj = 0)
+    # Return row index of the last constraint equation
+    return row_offset
+end
+# Build constraint equations for all parameters in a InverseAzRadVector
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::InverseAzRadVector; row_offset = 0, tf_jac_scale = false)
+    # Some questions
+    # 1. Individual or composit Jacobian scaling?
+    # 1.1. Does composite scaling work when meshes for each component are different?
+    # 2. Are seperate damping and smoothing weights for each component really necessary?
+    if tf_jac_scale
+        # Mean-squared sensitivity
+        wa, _ = conditional_mean(PerturbationModel.A.RSJS; f = (x -> x > 0.0))
+        wb, _ = conditional_mean(PerturbationModel.B.RSJS; f = (x -> x > 0.0))
+        wc, _ = conditional_mean(PerturbationModel.C.RSJS; f = (x -> x > 0.0))
+        # Composite squared-sensitivity to anisotropic strength
+        wf = sqrt(wa + wb) + wc
+        # Scale by mean uncertainty
+        wa = wf*mean(PerturbationModel.A.uncertainty)
+        wb = wf*mean(PerturbationModel.B.uncertainty)
+        wc = sqrt(wf)*mean(PerturbationModel.C.uncertainty)
+    else
+        wa, wb, wc = (1.0, 1.0, 1.0)
+    end
+
+    if ~isnothing(PerturbationModel.A)
+        # Kludge to prevent weighting contraints by prior model (do not want to do this for anisotropy)
+        m0 = range(start = 1.0, stop = 1.0, length = length(PerturbationModel.A.m0))
+        # Weights
+        μ = wa*PerturbationModel.A.wdamp[1]
+        println("A Damping Weight = "*string(μ/PerturbationModel.A.uncertainty[1]))
+        λ1 = wf*PerturbationModel.A.wsmooth[1]
+        λ2 = wf*PerturbationModel.A.wsmooth[2]
+        λ3 = wf*PerturbationModel.A.wsmooth[3]
+        println("A Smoothing Weight = "*string(λ1))
+        # Build damping constraints--always penalize incremental since this is non-linear
+        row_offset = damping_constraint!(Aᵢ, Aⱼ, Aᵥ, b, μ, m0, PerturbationModel.A.uncertainty, PerturbationModel.A.dm,
+        false; row_offset = row_offset, col_offset = PerturbationModel.A.jcol[1] - 1)
+        # Build smoothing constraints
+        row_offset = smoothing_constraint!(Aᵢ, Aⱼ, Aᵥ, b, (λ1/3.0, λ2/3.0, λ3/3.0), PerturbationModel.A.Mesh, m0, PerturbationModel.A.dm,
+        PerturbationModel.A.tf_smooth_cumulative[1]; row_offset = row_offset, col_offset = PerturbationModel.A.jcol[1] - 1)
+    end
+    if ~isnothing(PerturbationModel.B)
+        # Kludge to prevent weighting contraints by prior model (do not want to do this for anisotropy)
+        m0 = range(start = 1.0, stop = 1.0, length = length(PerturbationModel.B.m0))
+        # Weights
+        μ = wb*PerturbationModel.B.wdamp[1]
+        println("B Damping Weight = "*string(μ/PerturbationModel.B.uncertainty[1]))
+        λ1 = wf*PerturbationModel.B.wsmooth[1]
+        λ2 = wf*PerturbationModel.B.wsmooth[2]
+        λ3 = wf*PerturbationModel.B.wsmooth[3]
+        println("B Smoothing Weight = "*string(λ1))
+        # Build damping constraints--always penalize incremental since this is non-linear
+        row_offset = damping_constraint!(Aᵢ, Aⱼ, Aᵥ, b, μ, m0, PerturbationModel.B.uncertainty, PerturbationModel.B.dm,
+        false; row_offset = row_offset, col_offset = PerturbationModel.B.jcol[1] - 1)
+        # Build smoothing constraints
+        row_offset = smoothing_constraint!(Aᵢ, Aⱼ, Aᵥ, b, (λ1/3.0, λ2/3.0, λ3/3.0), PerturbationModel.B.Mesh, m0, PerturbationModel.B.dm,
+        PerturbationModel.B.tf_smooth_cumulative[1]; row_offset = row_offset, col_offset = PerturbationModel.B.jcol[1] - 1)
+    end
+    if ~isnothing(PerturbationModel.C)
+        # Kludge to prevent weighting contraints by prior model (do not want to do this for anisotropy)
+        m0 = range(start = 1.0, stop = 1.0, length = length(PerturbationModel.C.m0))
+        # Weights
+        μ = wc*PerturbationModel.C.wdamp[1]
+        println("C Damping Weight = "*string(μ/PerturbationModel.C.uncertainty[1]))
+        λ1 = sqrt(wf)*PerturbationModel.C.wsmooth[1]
+        λ2 = sqrt(wf)*PerturbationModel.C.wsmooth[2]
+        λ3 = sqrt(wf)*PerturbationModel.C.wsmooth[3]
+        println("C Smoothing Weight = "*string(λ1))
+        # Build damping constraints--always penalize incremental since this is non-linear
+        row_offset = damping_constraint!(Aᵢ, Aⱼ, Aᵥ, b, μ, m0, PerturbationModel.C.uncertainty, PerturbationModel.C.dm,
+        false; row_offset = row_offset, col_offset = PerturbationModel.C.jcol[1] - 1)
+        # Build smoothing constraints
+        row_offset = smoothing_constraint!(Aᵢ, Aⱼ, Aᵥ, b, (λ1/3.0, λ2/3.0, λ3/3.0), PerturbationModel.C.Mesh, m0, PerturbationModel.C.dm,
+        PerturbationModel.C.tf_smooth_cumulative[1]; row_offset = row_offset, col_offset = PerturbationModel.C.jcol[1] - 1)
+    end
+
+    # Total anisotropic strength
+    if PerturbationModel.A.tf_damp_cumulative[1]
+        μ = (wa + wb + (wc^2))/3.0 # For uniform fraction uncertainties, μ = wf*σf
+        μ = μ*((PerturbationModel.A.wdamp[1] + PerturbationModel.B.wdamp[1] + PerturbationModel.C.wdamp[1])/3.0)
+        println("Cumulative Anisotropic Damping Weight = "*string(μ/PerturbationModel.A.uncertainty[1]))
+        row_offset = min_total_anisotropic_fraction!(Aᵢ, Aⱼ, Aᵥ, b, μ, PerturbationModel; row_offset = row_offset)
+    end
+
+    # Return row index of the last constraint equation
+    return row_offset
+end
+# Build constraint equations to minimise the cumulative perturbation to the anisotropic magnitude
+function min_total_anisotropic_fraction!(Aᵢ, Aⱼ, Aᵥ, b, μ, PerturbationModel::InverseAzRadVector; row_offset = 0)
+    if PerturbationModel.A.Mesh.Geometry != PerturbationModel.B.Mesh.Geometry ||
+        PerturbationModel.A.Mesh.Geometry != PerturbationModel.C.Mesh.Geometry ||
+        PerturbationModel.A.Mesh.x != PerturbationModel.B.Mesh.x ||
+        PerturbationModel.A.Mesh.x != PerturbationModel.C.Mesh.x
+        error("Inconsistent meshes!")
+    end
+
+    npar = length(PerturbationModel.A.Mesh)
+    col_offset = (PerturbationModel.A.jcol[1] - 1, PerturbationModel.B.jcol[1] - 1, PerturbationModel.C.jcol[1] - 1)
+    for n = 1:npar
+        # Increment row counter
+        row_offset += 1
+        # Current symmetry axis parameters
+        sazm = 0.5*atan(PerturbationModel.B.m0[n] + PerturbationModel.B.dm[n],
+        PerturbationModel.A.m0[n] + PerturbationModel.A.dm[n])
+        sin2ψ, cos2ψ = sincos(2.0*sazm)
+        c = PerturbationModel.C.m0[n] + PerturbationModel.C.dm[n]
+        # Total damping weights
+        σf = (PerturbationModel.A.uncertainty[n] + PerturbationModel.B.uncertainty[n] + (PerturbationModel.C.uncertainty[n]^2))/3.0
+        wa = μ*cos2ψ/σf
+        wb = μ*sin2ψ/σf
+        wc = 2.0*μ*c/σf
+        # Add constraint
+        append!(Aᵢ, (row_offset, row_offset, row_offset))
+        append!(Aⱼ, (n + col_offset[1], n + col_offset[2], n + col_offset[3]))
+        append!(Aᵥ, (wa, wb, wc))
+        # Add condition
+        df = sqrt( (PerturbationModel.A.dm[n]^2) + (PerturbationModel.B.dm[n]^2) ) + (PerturbationModel.C.dm[n]^2)
+        push!(b, -μ*df/σf)
+    end
+
+    return row_offset
+end
+# Build constraint equations for a ParameterField
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::ParameterField; row_offset = 0, tf_jac_scale = false)
     # Weight adjustment for Jacobian scaling
     if tf_jac_scale
-        w = root_mean_rsjs(rsjs)
-        m̅ = mean(m₀)
-        σ̅ = mean(σₘ)
+        # Compute the RMS sensitivity of the sampled parameters
+        w, _ = conditional_mean(PerturbationModel.RSJS; f = (x -> x > 0.0))
+        w = sqrt(w)
+        m̅ = mean(PerturbationModel.m0)
+        σ̅ = mean(PerturbationModel.uncertainty)
     else
         w = 1.0
         m̅ = 1.0
         σ̅ = 1.0
     end
     # Scale damping and smoothing multipliers
-    μ = w*σ̅*m̅*μ
-    λ1 = w*m̅*λ[1]
-    λ2 = w*m̅*λ[2]
-    λ3 = w*m̅*λ[3]
+    μ = w*σ̅*m̅*PerturbationModel.wdamp[1]
+    λ1 = w*m̅*PerturbationModel.wsmooth[1]
+    λ2 = w*m̅*PerturbationModel.wsmooth[2]
+    λ3 = w*m̅*PerturbationModel.wsmooth[3]
 
-    # Build Damping Constraints
-    Dᵢ, Dⱼ, Dᵥ, δm, Δi = damping_constraint(μ, m₀, σₘ, Δm, μjump; Δi = Δi, Δj = Δj)
-    # Append constraints
-    append!(Aᵢ, Dᵢ)
-    append!(Aⱼ, Dⱼ)
-    append!(Aᵥ, Dᵥ)
-    append!(b, δm)
+    # Build damping constraints
+    row_offset = damping_constraint!(Aᵢ, Aⱼ, Aᵥ, b, μ, PerturbationModel.m0, PerturbationModel.uncertainty, PerturbationModel.dm,
+    PerturbationModel.tf_damp_cumulative[1]; row_offset = row_offset, col_offset = PerturbationModel.jcol[1] - 1)
 
-    # Smoothing Constraint
-    Lᵢ, Lⱼ, Lᵥ, δL, Δi = smoothing_constraint(Mesh, m₀, Δm, λ1, λ2, λ3, λjump; Δi = Δi, Δj = Δj)
-    # Append constraints
-    append!(Aᵢ, Lᵢ)
-    append!(Aⱼ, Lⱼ)
-    append!(Aᵥ, Lᵥ)
-    append!(b, δL)
+    # Build smoothing constraints
+    row_offset = smoothing_constraint!(Aᵢ, Aⱼ, Aᵥ, b, (λ1/3.0, λ2/3.0, λ3/3.0), PerturbationModel.Mesh, PerturbationModel.m0, PerturbationModel.dm,
+    PerturbationModel.tf_smooth_cumulative[1]; row_offset = row_offset, col_offset = PerturbationModel.jcol[1] - 1)
 
-    return Δi
+    return row_offset
+end
+# Build constraint equations for all SeismicStatics
+function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::SeismicStatics; row_offset = 0)
+    # Loop over static keys
+    for kj in eachindex(PerturbationModel.jcol) # Returns each dictionary key
+        # Define the damping parameter key (i.e. Observation-Phase pair)
+        ki = (kj[2], kj[3])
+        # Define the constraint if the damping is > 0
+        if PerturbationModel.wdamp[ki] > 0.0
+            row_offset += 1 # Increment row counter
+            j = PerturbationModel.jcol[kj] # Jacobian index
+            w = PerturbationModel.wdamp[ki]/PerturbationModel.uncertainty[kj] # Define the weight
+            # Append constraint
+            push!(Aᵢ, row_offset)
+            push!(Aⱼ, j)
+            push!(Aᵥ, w)
+            # Constraint value
+            if PerturbationModel.tf_damp_cumulative
+                dm = PerturbationModel.wdamp[ki]*PerturbationModel.dm[kj]/PerturbationModel.uncertainty[kj]
+                push!(b, -dm)
+            else
+                push!(b, 0.0)
+            end
+        end
+    end
+
+    return row_offset
 end
 
-# Damping System
-function damping_constraint(μ, m₀, σₘ, Δm, tf_jump; Δi = 0, Δj = 0)
-    # Damping constrain--minimise sum of squared parameter perturbations
-    np = length(m₀) # Number of parameters
-    Dᵢ = collect((1 + Δi):(np + Δi)) # Row index
-    Dⱼ = collect((1 + Δj):(np + Δj)) # Column index
-    Dᵥ = μ./(σₘ[:].*m₀[:]) # Coefficient
-    # Constraint vector
-    if tf_jump
-        δm = -Dᵥ.*Δm[Dⱼ]
+# Build constraint equation to minimise the perturbation to a single parameter
+function damping_constraint!(Aᵢ, Aⱼ, Aᵥ, b, μ, m₀, σₘ, Δm, tf_damp_cumulative; row_offset = 0, col_offset = 0)
+    # Damping constraint--minimise sum of squared parameter perturbations
+    npar = length(m₀)
+    for n in 1:npar
+        # Increment row counter
+        row_offset += 1
+        # Add constraint
+        push!(Aᵢ, row_offset)
+        push!(Aⱼ, n + col_offset)
+        push!(Aᵥ, μ/(σₘ[n].*m₀[n]))
+        if tf_damp_cumulative
+            push!(b, -μ*Δm[n]/(σₘ[n].*m₀[n]))
+        else
+            push!(b, 0.0)
+        end
+    end
+
+    return row_offset
+end
+
+# Build constraint equations to enforce spatially smooth perturbations
+function smoothing_constraint!(Aᵢ, Aⱼ, Aᵥ, b, λ, Mesh::RegularGrid{G, 3, R}, m₀, dm, tf_smooth_cumulative; row_offset = 0, col_offset = 0) where {G,R}
+    (ni, nj, nk) = size(Mesh)
+    for i in 1:ni, j in 1:nj, k in 1:nk
+        # Increment row counter
+        row_offset += 1
+        # Laplacian smoothing weights (3 per node in each dimension)
+        i_index, i_coeff = laplacian_weights(ni, i)
+        j_index, j_coeff = laplacian_weights(nj, j)
+        k_index, k_coeff = laplacian_weights(nk, k)
+
+        # First-dimension
+        jcol_1 = subscripts_to_index((ni, nj, nk), (i_index[1], j, k))
+        jcol_2 = subscripts_to_index((ni, nj, nk), (i_index[2], j, k))
+        jcol_3 = subscripts_to_index((ni, nj, nk), (i_index[3], j, k))
+        # Second-dimension
+        jcol_4 = subscripts_to_index((ni, nj, nk), (i, j_index[1], k))
+        jcol_5 = subscripts_to_index((ni, nj, nk), (i, j_index[2], k))
+        jcol_6 = subscripts_to_index((ni, nj, nk), (i, j_index[3], k))
+        # Third-dimension
+        jcol_7 = subscripts_to_index((ni, nj, nk), (i, j, k_index[1]))
+        jcol_8 = subscripts_to_index((ni, nj, nk), (i, j, k_index[2]))
+        jcol_9 = subscripts_to_index((ni, nj, nk), (i, j, k_index[3]))
+        # Append laplacian indices and weights for the n'th row (constraint)
+        append!(Aᵢ, (row_offset, row_offset, row_offset, row_offset, row_offset, row_offset, row_offset, row_offset, row_offset))
+        append!(Aⱼ, (col_offset + jcol_1, col_offset + jcol_2, col_offset + jcol_3,
+        col_offset + jcol_4, col_offset + jcol_5, col_offset + jcol_6,
+        col_offset + jcol_7, col_offset + jcol_8, col_offset + jcol_9))
+        append!(Aᵥ, (λ[1]*i_coeff[1]/m₀[jcol_1], λ[1]*i_coeff[2]/m₀[jcol_2], λ[1]*i_coeff[3]/m₀[jcol_3],
+        λ[2]*j_coeff[1]/m₀[jcol_4], λ[2]*j_coeff[2]/m₀[jcol_5], λ[2]*j_coeff[3]/m₀[jcol_6],
+        λ[3]*k_coeff[1]/m₀[jcol_7], λ[3]*k_coeff[2]/m₀[jcol_8], λ[3]*k_coeff[3]/m₀[jcol_9]))
+
+        if tf_smooth_cumulative
+            b_jrow = (λ[1]*i_coeff[1]*dm[jcol_1]/m₀[jcol_1]) + (λ[1]*i_coeff[2]*dm[jcol_2]/m₀[jcol_2]) + (λ[1]*i_coeff[3]*dm[jcol_3]/m₀[jcol_3]) +
+            (λ[2]*j_coeff[1]*dm[jcol_4]/m₀[jcol_4]) + (λ[2]*j_coeff[2]*dm[jcol_5]/m₀[jcol_5]) + (λ[2]*j_coeff[3]*dm[jcol_6]/m₀[jcol_6]) +
+            (λ[3]*k_coeff[1]*dm[jcol_7]/m₀[jcol_7]) + (λ[3]*k_coeff[2]*dm[jcol_8]/m₀[jcol_8]) + (λ[3]*k_coeff[3]*dm[jcol_9]/m₀[jcol_9])
+            push!(b, -b_jrow)
+        else
+            push!(b, 0.0)
+        end
+    end
+
+    return row_offset
+end
+
+# Return finite-difference coefficients for the 1D Laplacian
+function laplacian_weights(n, i)
+    if (i > 1) && (i < n)
+        j = (i-1, i, i+1)
     else
-        δm = zeros(np)
+        if i == 1
+            j = (i, i+1, i+2)
+        elseif i == n
+            j = (i, i-1, i-2)
+        else
+            error("Index out of range!")
+        end
     end
-    Δi = Δi + np
+    w = (0.5, -1.0, 0.5)
 
-    return Dᵢ, Dⱼ, Dᵥ, δm, Δi
+    return j, w
 end
 
-# Smoothing System
-function smoothing_constraint(Mesh, m₀, Δm, λᵢ, λⱼ, λₖ, tf_jump; Δi = 0, Δj = 0)
-    # Weighted Laplacian Smoothing Constraint
-    Lᵢ, Lⱼ, Lᵥ = sparse_laplacian(Mesh; wᵢ = λᵢ, wⱼ = λⱼ, wₖ = λₖ)
-    # Scale Laplacian by starting model (i.e. smoothing fractional perturbations)
-    Lᵥ .*= 1.0./m₀[Lⱼ]
-    # Constraint vector
-    np = length(Mesh)
-    δL = zeros(np)
-    if tf_jump
-        for k in eachindex(Lᵢ)
-            i = Lᵢ[k]
-            j = Lⱼ[k]
-            δL[i] -= Δm[j]*Lᵥ[k]
+# Compute mean in which only values satisfying some condition are considered
+function conditional_mean(x; f = (x -> x > 0.0))
+    sum_x = zero(eltype(x))
+    n = 0
+    for xi in x
+        if f(xi)
+            sum_x += xi
+            n += 1
         end
     end
-
-    # Shift the row and column indices
-    Lᵢ .+= Δi
-    Lⱼ .+= Δj
-    Δi += np
-
-    return Lᵢ, Lⱼ, Lᵥ, δL, Δi
-end
-
-function sparse_laplacian(Mesh::RegularGrid{T, 3, R}; wᵢ = 1.0, wⱼ = 1.0, wₖ = 1.0) where {T<:CoordinateSystem, R<:AbstractRange}
-    # ASSUMES GRID IS LARGER THAN OR EQUAL TO 4x4x4
-    nx₁, nx₂, nx₃ = size(Mesh)
-
-    # Number of central finite-difference coefficients
-    ncoeff = 3*((nx₁ - 2)*nx₂*nx₃ + (nx₂ - 2)*nx₁*nx₃ + (nx₃ - 2)*nx₁*nx₂)
-    # Add number of boundary finite-difference coefficients
-    ncoeff += 8*(nx₂*nx₃ + nx₁*nx₃ + nx₁*nx₂)
-    # Allocate storage arrays
-    Lᵢ = zeros(Int, ncoeff)
-    Lⱼ = zeros(Int, ncoeff)
-    Lᵥ = zeros(Float64, ncoeff)
-    # Initialize counter
-    ind = 1
-    # Loop over all nodes and compute finite-difference coefficients
-    for i in 1:nx₁, j in 1:nx₂, k in 1:nx₃
-        n₀ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k))
-        # x₁-dimension
-        if (i > 1) && (i < nx₁)
-            # Central difference (2ⁿᵈ-order)
-            n₋ = subscripts_to_index((nx₁, nx₂, nx₃), (i-1, j, k))
-            n₊ = subscripts_to_index((nx₁, nx₂, nx₃), (i+1, j, k))
-            # i - 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₋
-            Lᵥ[ind] = wᵢ*1.0
-            ind += 1
-            # i
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₀
-            Lᵥ[ind] = -wᵢ*2.0
-            ind += 1
-            # i + 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₊
-            Lᵥ[ind] = wᵢ*1.0
-            ind += 1
-        else
-            # Forward/Backward difference (2ⁿᵈ-order)
-            if (i == 1)
-                n₁ = subscripts_to_index((nx₁, nx₂, nx₃), (i+1, j, k))
-                n₂ = subscripts_to_index((nx₁, nx₂, nx₃), (i+2, j, k))
-                n₃ = subscripts_to_index((nx₁, nx₂, nx₃), (i+3, j, k))
-            elseif (i == nx₁)
-                n₁ = subscripts_to_index((nx₁, nx₂, nx₃), (i-1, j, k))
-                n₂ = subscripts_to_index((nx₁, nx₂, nx₃), (i-2, j, k))
-                n₃ = subscripts_to_index((nx₁, nx₂, nx₃), (i-3, j, k))
-            end
-            # i
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₀
-            Lᵥ[ind] = wᵢ*2.0
-            ind += 1
-            # i ± 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₁
-            Lᵥ[ind] = -wᵢ*5.0
-            ind += 1
-            # i ± 2
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₂
-            Lᵥ[ind] = wᵢ*4.0
-            ind += 1
-            # i ± 3
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₃
-            Lᵥ[ind] = -wᵢ*1.0
-            ind += 1
-        end
-        # x₂-dimension
-        if (j > 1) && (j < nx₂)
-            # Central difference (2ⁿᵈ-order)
-            n₋ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j-1, k))
-            n₊ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j+1, k))
-            # i - 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₋
-            Lᵥ[ind] = wⱼ*1.0
-            ind += 1
-            # i
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₀
-            Lᵥ[ind] = -wⱼ*2.0
-            ind += 1
-            # i + 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₊
-            Lᵥ[ind] = wⱼ*1.0
-            ind += 1
-        else
-            # Forward/Backward difference (2ⁿᵈ-order)
-            if (j == 1)
-                n₁ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j+1, k))
-                n₂ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j+2, k))
-                n₃ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j+3, k))
-            elseif (j == nx₂)
-                n₁ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j-1, k))
-                n₂ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j-2, k))
-                n₃ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j-3, k))
-            end
-            # i
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₀
-            Lᵥ[ind] = wⱼ*2.0
-            ind += 1
-            # i ± 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₁
-            Lᵥ[ind] = -wⱼ*5.0
-            ind += 1
-            # i ± 2
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₂
-            Lᵥ[ind] = wⱼ*4.0
-            ind += 1
-            # i ± 3
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₃
-            Lᵥ[ind] = -wⱼ*1.0
-            ind += 1
-        end
-        # x₃-dimension
-        if (k > 1) && (k < nx₃)
-            # Central difference (2ⁿᵈ-order)
-            n₋ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k-1))
-            n₊ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k+1))
-            # i - 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₋
-            Lᵥ[ind] = wₖ*1.0
-            ind += 1
-            # i
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₀
-            Lᵥ[ind] = -wₖ*2.0
-            ind += 1
-            # i + 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₊
-            Lᵥ[ind] = wₖ*1.0
-            ind += 1
-        else
-            # Forward/Backward difference (2ⁿᵈ-order)
-            if (k == 1)
-                n₁ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k+1))
-                n₂ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k+2))
-                n₃ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k+3))
-            elseif (k == nx₃)
-                n₁ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k-1))
-                n₂ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k-2))
-                n₃ = subscripts_to_index((nx₁, nx₂, nx₃), (i, j, k-3))
-            end
-            # i
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₀
-            Lᵥ[ind] = wₖ*2.0
-            ind += 1
-            # i ± 1
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₁
-            Lᵥ[ind] = -wₖ*5.0
-            ind += 1
-            # i ± 2
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₂
-            Lᵥ[ind] = wₖ*4.0
-            ind += 1
-            # i ± 3
-            Lᵢ[ind] = n₀
-            Lⱼ[ind] = n₃
-            Lᵥ[ind] = -wₖ*1.0
-            ind += 1
-        end
+    if n > 0
+        sum_x /= n
     end
 
-    return Lᵢ, Lⱼ, Lᵥ
+    return sum_x, n
 end
 
 
 
+# PERTURBATION MODEL UPDATE
 
-function compute_dlnV(Model::ModelTauP{<:IsotropicVelocity})
-    dims = size(Model.Mesh)
-    dlnVp = zeros(dims)
-    dlnVs = zeros(dims)
+# Update all perturbation fields in a SeismicPerturbationModel
+function update_parameters!(PerturbationModel::SeismicPerturbationModel, x)
+    if ~isnothing(PerturbationModel.Velocity)
+        update_parameters!(PerturbationModel.Velocity, x)
+    end
+    if ~isnothing(PerturbationModel.Interface)
+        error("Interface parameter update not yet defined.")
+    end
+    if ~isnothing(PerturbationModel.Hypocenter)
+        error("Hypocenter parameter update not yet defined.")
+    end
+    if ~isnothing(PerturbationModel.SourceStatics)
+        update_parameters!(PerturbationModel.SourceStatics, x)
+    end
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        update_parameters!(PerturbationModel.ReceiverStatics, x)
+    end
 
-    for k in 1:dims[3]
-        rq = Model.Rₜₚ - Model.Mesh.CS.R₀ - Model.Mesh.x[3][k]
-        vp = piecewise_linearly_interpolate(Model.r, Model.nd, Model.vp, rq; tf_extrapolate = true, tf_harmonic = true)
-        vs = piecewise_linearly_interpolate(Model.r, Model.nd, Model.vs, rq; tf_extrapolate = true, tf_harmonic = true)
-        for i in 1:dims[1], j in 1:dims[2]
-            dlnVp[i, j, k] = Model.m.vp[i, j, k]/vp
-            dlnVs[i, j, k] = Model.m.vs[i, j, k]/vs
+    return nothing
+end
+# Update all perturbation fields in a InverseSeismicVelocity
+function update_parameters!(PerturbationModel::InverseSeismicVelocity, x)
+    if ~isnothing(PerturbationModel.Isotropic)
+        update_parameters!(PerturbationModel.Isotropic, x)
+    end
+    if ~isnothing(PerturbationModel.Anisotropic)
+        update_parameters!(PerturbationModel.Anisotropic, x)
+    end
+
+    return nothing
+end
+# Update all perturbation fields in a InverseIsotropicSlowness
+function update_parameters!(PerturbationModel::InverseIsotropicSlowness, x)
+    if ~isnothing(PerturbationModel.Up)
+        update_parameters!(PerturbationModel.Up, x)
+    end
+
+    if ~isnothing(PerturbationModel.Us)
+        update_parameters!(PerturbationModel.Us, x)
+    end
+
+    return nothing
+end
+# Update all perturbation fields in a InverseAnisotropicVector
+function update_parameters!(PerturbationModel::InverseAnisotropicVector, x)
+    if ~isnothing(PerturbationModel.Orientations)
+        update_parameters!(PerturbationModel.Orientations, x)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        update_parameters!(PerturbationModel.Fractions, x)
+    end
+
+    return nothing
+end
+# Update all perturbation fields in a InverseAzRadVector
+function update_parameters!(PerturbationModel::InverseAzRadVector, x)
+    if ~isnothing(PerturbationModel.A)
+        update_parameters!(PerturbationModel.A, x)
+    end
+    if ~isnothing(PerturbationModel.B)
+        update_parameters!(PerturbationModel.B, x)
+    end
+    if ~isnothing(PerturbationModel.C)
+        update_parameters!(PerturbationModel.C, x)
+    end
+
+    return nothing
+end
+# Update all perturbation fields in a ParameterField
+function update_parameters!(PerturbationModel::ParameterField, x)
+    # Copy the columns of the solution vector to the appropriate incremental perturbations field
+    N = 1 + PerturbationModel.jcol[2] - PerturbationModel.jcol[1]
+    copyto!(PerturbationModel.ddm, 1, x, PerturbationModel.jcol[1], N)
+    # Update the cumulative perturbation field
+    PerturbationModel.dm .+= PerturbationModel.ddm
+
+    return nothing
+end
+# Update all SeismicStatics
+function update_parameters!(PerturbationModel::SeismicStatics, x)
+    for k in eachindex(PerturbationModel.jcol)
+        PerturbationModel.ddm[k] = x[PerturbationModel.jcol[k]]
+        PerturbationModel.dm[k] += x[PerturbationModel.jcol[k]]
+    end
+
+    return nothing
+end
+
+
+
+# UPDATE KERNEL PARAMETERS
+
+# Update all SeismicPerturbationModel parameters in a Vector of ObservableKernel
+function update_kernel!(Kernels::Vector{<:ObservableKernel}, PerturbationModel::SeismicPerturbationModel)
+    if ~isnothing(PerturbationModel.Velocity)
+        println("Updating Kernels -> Velocity")
+        update_kernel!(Kernels, PerturbationModel.Velocity)
+    end
+    if ~isnothing(PerturbationModel.Interface)
+        error("Interface kernel update not yet defined.")
+    end
+    if ~isnothing(PerturbationModel.Hypocenter)
+        error("Hypocenter kernel update not yet defined.")
+    end
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        println("Updating Kernels -> ReceiverStatics")
+        update_kernel!(Kernels, PerturbationModel.ReceiverStatics)
+    end
+    if ~isnothing(PerturbationModel.SourceStatics)
+        println("Updating Kernels -> SourceStatics")
+        update_kernel!(Kernels, PerturbationModel.SourceStatics)
+    end
+
+    return nothing
+end
+# Update a InversionParameter in a Vector of ObservableKernel
+function update_kernel!(Kernels::Vector{<:ObservableKernel}, PerturbationModel::InversionParameter)
+    println("Updating Kernels -> "*string(typeof(PerturbationModel)))
+    for a_Kernel in Kernels
+        update_kernel!(a_Kernel, PerturbationModel)
+    end
+
+    return nothing
+end
+# Update InverseSeismicVelocity parameters in an ObservableKernel
+function update_kernel!(Kernel::ObservableKernel, PerturbationModel::InverseSeismicVelocity)
+    # Convert kernel parameterisation to be consistent with inversion parameterisation
+    convert_parameters!(Kernel.Parameters, PerturbationModel)
+    # Update converted kernel parameters
+    if ~isnothing(PerturbationModel.Isotropic)
+        update_kernel!(Kernel, PerturbationModel.Isotropic)
+    end
+    if ~isnothing(PerturbationModel.Anisotropic)
+        update_kernel!(Kernel, PerturbationModel.Anisotropic)
+    end
+    # Revert back to original kernel parameterisation
+    revert_parameters!(Kernel.Parameters, PerturbationModel)
+
+    return nothing
+end
+function convert_parameters!(::IsotropicVelocity, ::InverseSeismicVelocity)
+    return nothing
+end
+function revert_parameters!(::IsotropicVelocity, ::InverseSeismicVelocity)
+    return nothing
+end
+function convert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSeismicVelocity{I, A}) where {I <: InverseIsotropicSlowness, A}
+    # Convert symmetry axis (i.e. Thomsen's reference velocities) to isotropic velocities
+    for i in eachindex(Parameters.f)
+        vip, vis = return_isotropic_velocities(Parameters, i)
+        if ~isnothing(Parameters.α)
+            Parameters.α[i] = vip
+        end
+        if ~isnothing(Parameters.β)
+            Parameters.β[i] = vis
         end
     end
 
-    return dlnVp, dlnVs
+    return nothing
+end
+function revert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSeismicVelocity{I, A}) where {I <: InverseIsotropicSlowness, A}
+    # Convert symmetry axis (i.e. Thomsen's reference velocities) to isotropic velocities
+    for i in eachindex(Parameters.f)
+        # Assumed that the α and β fields are currently storing the isotropic P- and S-velocity
+        vip, vis, _ = return_thomsen_parameters(Parameters, i)
+        α, β = return_reference_velocities(Parameters, vip, vis, i)
+        if ~isnothing(Parameters.α)
+            Parameters.α[i] = α
+        end
+        if ~isnothing(Parameters.β)
+            Parameters.β[i] = β
+        end
+    end
+
+    return nothing
+end
+# Update InverseIsotropicSlowness parameters in an ObservableKernel
+function update_kernel!(Kernel::ObservableKernel, PerturbationModel::InverseIsotropicSlowness)
+    # Get pointers to velocity fields
+    vp_field, vs_field = return_velocity_fields(Kernel.Parameters)
+
+    # Update P-Velocities
+    if ~isnothing(vp_field) && ~isnothing(PerturbationModel.Up)
+        # Convert velocity to slowness
+        vp_field .= inv.(vp_field)
+        # Interpolate and add slowness perturbations
+        update_kernel_field!(vp_field, Kernel, PerturbationModel.Up; tf_extrapolate = false, tf_harmonic = false)
+        # Convert back to velocity
+        vp_field .= inv.(vp_field)
+    end
+
+    # Update S-velocities
+    if ~isnothing(vs_field) && ~isnothing(PerturbationModel.Us)
+        if PerturbationModel.coupling_option == 0
+            # Convert velocity to slowness
+            vs_field .= inv.(vs_field)
+            # Interpolate and add slowness perturbations
+            update_kernel_field!(vs_field, Kernel, PerturbationModel.Us; tf_extrapolate = false, tf_harmonic = false)
+            # Convert back to velocity
+            vs_field .= inv.(vs_field)
+        elseif PerturbationModel.coupling_option == 1
+            # Inversion for S-to-P slowness ratio. How to do this update?
+            #   us = r*up -> Dus = r*(dus/dup) + (dus/dr)*up
+            #   us = (r + dr)*(up + dup) = r*up + r*dup + dr*up + dr*dup = us + r*dup + dr*up + dr*dup
+            for (i, xq) in enumerate(Kernel.coordinates)
+                # Convert global kernel coordinates to the local mesh coordinates
+                xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Us.Mesh.Geometry)
+                # Interpolate starting S-to-P slowness ratio
+                r = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.m0, (xl, yl, zl);
+                tf_extrapolate = false, tf_harmonic = false)
+                # Interpolate the cumulative S-to-P slowness ratio perturbation
+                dr = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.dm, (xl, yl, zl);
+                tf_extrapolate = false, tf_harmonic = false)
+                # Interpolate the incremental S-to-P slowness ratio perturbation
+                ddr = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.ddm, (xl, yl, zl);
+                tf_extrapolate = false, tf_harmonic = false)
+                # Interpolate incremental perturbation to P-slowness
+                xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Up.Mesh.Geometry)
+                ddup = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.ddm, (xl, yl, zl);
+                tf_extrapolate = false, tf_harmonic = false)
+                # P-slowness at previous iteration
+                r = r + dr - ddr
+                up = 1.0/(r*vs_field[i])
+                # S-velocity update
+                vs_field[i] = 1.0/((1.0/vs_field[i]) + r*ddup + ddr*up + ddr*ddup)
+            end
+        else
+            error("Coupling option not implemented!")
+        end
+    end
+
+    return nothing
+end
+# Update InverseAnisotropicVector parameters in an ObservableKernel
+function update_kernel!(Kernel::ObservableKernel, PerturbationModel::InverseAnisotropicVector)
+    if ~isnothing(PerturbationModel.Orientations)
+        update_kernel!(Kernel, PerturbationModel.Orientations)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        update_kernel!(Kernel, PerturbationModel.Fractions)
+    end
+
+    return nothing
+end
+# Update InverseAzRadVector parameters in a HexagonalVectoralVelocity-Parameterized ObservableKernel
+function update_kernel!(Kernel::ObservableKernel{B, P}, PerturbationModel::InverseAzRadVector) where {B, P <: HexagonalVectoralVelocity}
+    # Check that Mesh geometries are consistent
+    if (PerturbationModel.A.Mesh.Geometry != PerturbationModel.B.Mesh.Geometry) ||
+        (PerturbationModel.A.Mesh.Geometry != PerturbationModel.C.Mesh.Geometry)
+        error("Inconsistent mesh geometries!")
+    end
+
+    # Update kernel elements
+    for (i, x_global) in enumerate(Kernel.coordinates)
+        # Coordinate System Conversions
+        x_geo = global_to_geographic(x_global[1], x_global[2], x_global[3]; radius = PerturbationModel.A.Mesh.Geometry.R₀)
+        x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
+        # Symmetry axis orientations in the local coordinate system
+        # The AzRad-Vector is always defined with respect to the plane tanget to the Earth's surface at a given point
+        sazm, selv = global_to_local_angles(Kernel.Parameters.azimuth[i], Kernel.Parameters.elevation[i], x_geo, PerturbationModel.A.Mesh.Geometry) # Symmetry axis
+
+        # Interpolate incremental perturbations
+        dda = linearly_interpolate(PerturbationModel.A.Mesh.x, PerturbationModel.A.ddm, x_local;
+        tf_extrapolate = false, tf_harmonic = false)
+        ddb = linearly_interpolate(PerturbationModel.B.Mesh.x, PerturbationModel.B.ddm, x_local;
+        tf_extrapolate = false, tf_harmonic = false)
+        ddc = linearly_interpolate(PerturbationModel.C.Mesh.x, PerturbationModel.C.ddm, x_local;
+        tf_extrapolate = false, tf_harmonic = false)
+        # Compute new AzRad vector parameters
+        f, sazm, selv = update_azrad_vector(Kernel.Parameters.f[i], sazm, selv, dda, ddb, ddc)
+        # Convert local to global angles
+        sazm, selv = local_to_global_angles(sazm, selv, x_geo, PerturbationModel.A.Mesh.Geometry)
+
+        # Update kernel anisotropy parameters
+        Kernel.Parameters.f[i] = f
+        Kernel.Parameters.azimuth[i] = sazm
+        Kernel.Parameters.elevation[i] = selv
+    end
+
+    return nothing
+end
+function update_azrad_vector(f, sazm, selv, da, db, dc)
+    # Current symmetry axis trigonometric factors
+    sin2ψ, cos2ψ = sincos(2.0*sazm)
+    sinλ, cosλ = sincos(selv)
+    # Compute perturbed AzRad vector components
+    a = f*cos2ψ*(cosλ^2) + da
+    b = f*sin2ψ*(cosλ^2) + db
+    c = sqrt(f)*sinλ + dc
+    # Compute perturbed anisotropic strength and orientations 
+    f = sqrt((a^2) + (b^2)) + (c^2)
+    ψ = 0.5*atan(b, a)
+    λ = atan(c, sqrt(sqrt((a^2) + (b^2))))
+
+    return f, ψ, λ
+end
+# Update SeismicStatics parameters in an ObservableKernel
+function update_kernel!(Kernel::ObservableKernel, PerturbationModel::SeismicStatics)
+    static_type = typeof(PerturbationModel)
+    if static_type <: SeismicSourceStatics
+        kiop = (Kernel.Observation.source_id, nameof(typeof(Kernel.Observation)), nameof(typeof(Kernel.Observation.Phase)))
+    elseif static_type <: SeismicReceiverStatics
+        kiop = (Kernel.Observation.receiver_id, nameof(typeof(Kernel.Observation)), nameof(typeof(Kernel.Observation.Phase)))
+    else
+        error("Unrecognized static type!")
+    end
+    
+    if haskey(PerturbationModel.ddm, kiop)
+        Kernel.static[1] += PerturbationModel.ddm[kiop]
+    end
+
+    return nothing
+end
+
+# Adds incremental perturbations in a ParameterField to an ObservableKernel
+function update_kernel_field!(outfield, Kernel::ObservableKernel, PerturbationModel::ParameterField; tf_extrapolate = false, tf_harmonic = false)
+    for (i, xq) in enumerate(Kernel.coordinates)
+        # Convert global kernel coordinates to the local mesh coordinates
+        xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Mesh.Geometry)
+        # Interpolate perturbation
+        ddm_q = linearly_interpolate(PerturbationModel.Mesh.x, PerturbationModel.ddm, (xl, yl, zl);
+        tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        # Add perturbation to kernel parameter
+        outfield[i] += ddm_q
+    end
+
+    return nothing
+end
+
+
+# UPDATE FORWARD MODEL
+# NOTE! As implemented, cumulative perturbations are being added to the forward model.
+# Consequently, this update is assumed to be performed only once. However, if multiple
+# iterations involving re-computing kerenls are performed, this update will be incorrect!
+
+# Update all SeismicPerturbationModel parameters in a PsiModel
+function update_model!(Model::PsiModel, PerturbationModel::SeismicPerturbationModel)
+    if ~isnothing(PerturbationModel.Velocity)
+        update_model!(Model, PerturbationModel.Velocity)
+    end
+    if ~isnothing(PerturbationModel.Interface)
+        error("Interface model update not yet defined.")
+    end
+    if ~isnothing(PerturbationModel.Hypocenter)
+        error("Hypocenter model update not yet defined.")
+    end
+    if ~isnothing(PerturbationModel.SourceStatics)
+        update_model!(Model, PerturbationModel.SourceStatics)
+    end
+    if ~isnothing(PerturbationModel.ReceiverStatics)
+        update_model!(Model, PerturbationModel.ReceiverStatics)
+    end
+
+    return nothing
+end
+# Update all InverseSeismicVelocity parameters in a PsiModel
+function update_model!(Model::PsiModel, PerturbationModel::InverseSeismicVelocity)
+    # Convert model parameterisation to be consistent with inversion parameterisation
+    convert_parameters!(Model.Parameters, PerturbationModel)
+    # Update converted kernel parameters
+    if ~isnothing(PerturbationModel.Isotropic)
+        update_model!(Model, PerturbationModel.Isotropic)
+    end
+    if ~isnothing(PerturbationModel.Anisotropic)
+        update_model!(Model, PerturbationModel.Anisotropic)
+    end
+    # Revert back to original kernel parameterisation
+    revert_parameters!(Model.Parameters, PerturbationModel)
+
+    return nothing
+end
+# Update all InverseIsotropicSlowness parameters in a PsiModel
+function update_model!(Model::PsiModel, PerturbationModel::InverseIsotropicSlowness)
+    # Get pointers to velocity fields
+    vp_field, vs_field = return_velocity_fields(Model.Parameters)
+
+    if ~isnothing(PerturbationModel.Up)
+        # Convert to slowness
+        vp_field .= inv.(vp_field)
+        # Add slowness perturbations
+        add_perturbations!(vp_field, PerturbationModel.Up.Mesh, PerturbationModel.Up.dm, Model.Mesh;
+        tf_extrapolate = false, tf_harmonic = false)
+        # Convert back to velocity
+        vp_field .= inv.(vp_field)
+    end
+
+    if ~isnothing(PerturbationModel.Us)
+        if PerturbationModel.coupling_option == 0
+            # Convert to slowness
+            vs_field .= inv.(vs_field)
+            # Add slowness perturbations
+            add_perturbations!(vs_field, PerturbationModel.Us.Mesh, PerturbationModel.Us.dm, Model.Mesh;
+            tf_extrapolate = false, tf_harmonic = false)
+            # Convert back to velocity
+            vs_field .= inv.(vs_field)
+        else
+            error("Model update not implemented!")
+        end
+    end
+
+    return nothing
+end
+# Update InverseAnisotropicVector parameters in an PsiModel
+function update_model!(Model::PsiModel, PerturbationModel::InverseAnisotropicVector)
+    if ~isnothing(PerturbationModel.Orientations)
+        update_model!(Model, PerturbationModel.Orientations)
+    end
+    if ~isnothing(PerturbationModel.Fractions)
+        update_model!(Model, PerturbationModel.Fractions)
+    end
+
+    return nothing
+end
+# Update all InverseAzRadVector parameters in a PsiModel with HexagonalVectoralVelocity parameters
+function update_model!(Model::PsiModel{<:HexagonalVectoralVelocity}, PerturbationModel::InverseAzRadVector)
+    # Check that Mesh geometries are consistent
+    if (PerturbationModel.A.Mesh.Geometry != PerturbationModel.B.Mesh.Geometry) ||
+        (PerturbationModel.A.Mesh.Geometry != PerturbationModel.C.Mesh.Geometry)
+        error("Inconsistent mesh geometries!")
+    end
+
+    # Update model elements
+    for (k, qz) in enumerate(Model.Mesh.x[3])
+        for (j, qy) in enumerate(Model.Mesh.x[2])
+            for (i, qx) in enumerate(Model.Mesh.x[1])
+                # Interpolate cumulative perturbations
+                da = linearly_interpolate(PerturbationModel.A.Mesh.x, PerturbationModel.A.dm, (qx, qy, qz);
+                tf_extrapolate = false, tf_harmonic = false)
+                db = linearly_interpolate(PerturbationModel.B.Mesh.x, PerturbationModel.B.dm, (qx, qy, qz);
+                tf_extrapolate = false, tf_harmonic = false)
+                dc = linearly_interpolate(PerturbationModel.C.Mesh.x, PerturbationModel.C.dm, (qx, qy, qz);
+                tf_extrapolate = false, tf_harmonic = false)
+                # Compute new AzRad vector parameters
+                f, sazm, selv = update_azrad_vector(Model.Parameters.f[i,j,k], Model.Parameters.azimuth[i,j,k],
+                Model.Parameters.elevation[i,j,k], da, db, dc)
+
+                # Update kernel anisotropy parameters
+                Model.Parameters.f[i,j,k] = f
+                Model.Parameters.azimuth[i,j,k] = sazm
+                Model.Parameters.elevation[i,j,k] = selv
+            end
+        end
+    end
+
+    return nothing
+end
+# Update SeismicSourceStatics in a PsiModel
+function update_model!(Model::PsiModel, PerturbationModel::SeismicSourceStatics)
+    for k in eachindex(PerturbationModel.dm)
+        if haskey(Model.Sources.statics, k)
+            # Accumulate static
+            Model.Sources.statics[k] += PerturbationModel.dm[k]
+        else
+            # Add static
+            Model.Sources.statics[k] = PerturbationModel.dm[k]
+        end
+    end
+
+    return nothing
+end
+# Update SeismicReceiverStatics in a PsiModel
+function update_model!(Model::PsiModel, PerturbationModel::SeismicReceiverStatics)
+    for k in eachindex(PerturbationModel.dm)
+        if haskey(Model.Receivers.statics, k)
+            Model.Receivers.statics[k] += PerturbationModel.dm[k]
+        else
+            Model.Receivers.statics[k] = PerturbationModel.dm[k]
+        end
+    end
+
+    return nothing
+end
+
+
+
+# NEW INTERPOLATION ROUTINES
+
+# Interpolate between meshes -- Same as interpolate_field! but adds interpolated value to outfield instead of replacing
+function add_perturbations!(outfield, inMesh::RegularGrid{G}, infield, outMesh::RegularGrid{G, 3}; tf_extrapolate = false, tf_harmonic = false) where {G}
+    # Check that coordinate systems are equivalent
+    if (inMesh.Geometry.λ₀ != outMesh.Geometry.λ₀) || (inMesh.Geometry.ϕ₀ != outMesh.Geometry.ϕ₀) ||
+        (inMesh.Geometry.R₀ != outMesh.Geometry.R₀) || (inMesh.Geometry.β != outMesh.Geometry.β)
+        error("Need to update interpolate_field! for meshes with different origins!")
+    end
+
+    for (k, qz) in enumerate(outMesh.x[3])
+        for (j, qy) in enumerate(outMesh.x[2])
+            for (i, qx) in enumerate(outMesh.x[1])
+                outfield[i,j,k] += linearly_interpolate(inMesh.x, infield, (qx,qy,qz); tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+            end
+        end
+    end
+
+    return nothing
+end
+
+# USED IN BUILDING INPUTS <- THESE NEED TO BE UPDATED
+# Interpolating values between models
+function interpolate_parameters!(OutField::InverseIsotropicSlowness, InField::PsiModel{<:IsotropicVelocity}; tf_extrapolate = false, tf_harmonic = false)
+    if ~isnothing(OutField.Up)
+        interpolate_field!(OutField.Up.m0, InField.Mesh, InField.Parameters.vp, OutField.Up.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        # Convert back to slowness
+        OutField.Up.m0 .= inv.(OutField.Up.m0)
+    end
+    if ~isnothing(OutField.Us)
+        interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.vs, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        # Convert back to slowness
+        OutField.Us.m0 .= inv.(OutField.Us.m0)
+        if OutField.coupling_option == 1
+            # Convert S-Slownes to S-to-P slowness ratio (i.e. Vp/Vs ratio)
+            # This conversion could be done without allocation but I'm being lazy here...
+            vp_field = zeros(eltype(OutField.Us), size(OutField.Us.Mesh))
+            # Interpolate P-velocity field to the S-slowness inversion mesh
+            interpolate_field!(vp_field, InField.Mesh, InField.Parameters.vp, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+            # Compute ratio
+            OutField.Us.m0 .*= vp_field
+        end
+    end
+
+    return nothing
+end
+function interpolate_parameters!(OutField::InverseIsotropicSlowness, InField::PsiModel{<:HexagonalVectoralVelocity}; tf_extrapolate = false, tf_harmonic = false)
+    
+    # Convert reference velocities to isotropic velocities before interpolation
+    # convert_parameters!(OutField, InField.Parameters) # <---- NOT NEEDED IF STARTING MODEL IS ASSUMED ISOTROPIC!
+
+    if ~isnothing(OutField.Up)
+        # Interpolate the isotropic velocities
+        interpolate_field!(OutField.Up.m0, InField.Mesh, InField.Parameters.α, OutField.Up.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        # Convert back to slowness
+        OutField.Up.m0 .= inv.(OutField.Up.m0)
+    end
+    if ~isnothing(OutField.Us)
+        interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.β, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        # Convert back to slowness
+        OutField.Us.m0 .= inv.(OutField.Us.m0)
+        if OutField.coupling_option == 1
+            # Convert S-Slownes to S-to-P slowness ratio (i.e. Vp/Vs ratio)
+            # This conversion could be done without allocation but I'm being lazy here...
+            vp_field = zeros(eltype(OutField.Us), size(OutField.Us.Mesh))
+            # Interpolate P-velocity field to the S-slowness inversion mesh
+            interpolate_field!(vp_field, InField.Mesh, InField.Parameters.vp, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+            # Compute ratio
+            OutField.Us.m0 .*= vp_field
+        end
+    end
+
+    # Revert isotropic velocities back to reference velocities
+    # revert_parameters!(OutField, InField.Parameters) # <---- NOT NEEDED IF STARTING MODEL IS ASSUMED ISOTROPIC!
+
+    return nothing
+end
+# USED IN BUILDING INPUTS
+
+# Interpolate between meshes
+function interpolate_field!(outfield, inMesh::RegularGrid{G}, infield, outMesh::RegularGrid{G, 3}; tf_extrapolate = false, tf_harmonic = false) where {G}
+    # Check that coordinate systems are equivalent
+    if (inMesh.Geometry.λ₀ != outMesh.Geometry.λ₀) || (inMesh.Geometry.ϕ₀ != outMesh.Geometry.ϕ₀) ||
+        (inMesh.Geometry.R₀ != outMesh.Geometry.R₀) || (inMesh.Geometry.β != outMesh.Geometry.β)
+        error("Need to update interpolate_field! for meshes with different origins!")
+    end
+
+    for (k, qz) in enumerate(outMesh.x[3])
+        for (j, qy) in enumerate(outMesh.x[2])
+            for (i, qx) in enumerate(outMesh.x[1])
+                outfield[i,j,k] = linearly_interpolate(inMesh.x, infield, (qx,qy,qz); tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+            end
+        end
+    end
+
+    return nothing
 end
