@@ -4,41 +4,28 @@ using SparseArrays
 using IterativeSolvers
 using Distributions
 using TOML
+using WriteVTK
 using Plots
 
-include("src/utilities.jl"); # Random utilities
-include("src/CoordinateSystems.jl"); # Coordinate system functions
-include("src/psi_structures.jl"); # Main structures
-include("src/psi_buildinputs.jl"); # Inversion routines
-include("src/psi_forward.jl"); # Forward problem routines
-include("src/psi_inverse.jl"); # Inversion routines
-include("src/psi_interpolations.jl"); # Interpolation routines
+include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_coordinate_systems.jl"); # Coordinate system functions
+include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_forward.jl"); # Forward problem routines
+include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_inverse.jl"); # Inversion routines
+include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_output.jl"); # Function for writing results
+include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_buildinputs.jl"); # Inversion routines
+include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/utilities.jl"); # Random utilities
+
+# The parameter file
+the_parameters = "/Users/bvanderbeek/research/software/GitRepos/PSI_D/examples/VF2021_Subduction/psi_parameter_file_AniInvP.toml"
 
 # Build Input Parameters
-Obs, Model, InvParam, Solv, Dp = build_inputs("/Users/bvanderbeek/research/CASCADIA/Joint/PSI_Inputs/deterministic/psi_parameters.toml");
+PsiParameters, Observations, ForwardModel, PerturbationModel, Solver = build_inputs(the_parameters);
 
-# Calling just the forward problem
-K, r, q = psi_forward(Obs, Model);
+# Call the forward problem
+predictions, relative_residuals, Kernels = psi_forward(Observations, ForwardModel);
 
-# Compute Demeaned Residuals
-Δt, _ = mean_source_delay(r, Obs, Model.Sources)
-println(1000*std(Δt))
-
-# Calling the inversion
-psi_inverse!(Model, InvParam, Obs, Solv);
+# Call the inverse problem
+psi_inverse!(Observations, ForwardModel, PerturbationModel, Solver);
 # @time psi_inverse!(Model, InvParam, Obs, Solv);
 
-# Plot Solution
-if ~isnothing(InvParam.Velocity.up)
-    dlnV, _ = compute_dlnV(Model)
-    clim = (-0.02, 0.02)
-elseif ~isnothing(InvParam.Velocity.us)
-    _, dlnV = compute_dlnV(Model)
-    clim = (-0.03, 0.03)
-end
-heatmap(transpose(dlnV[:,:,16]), color=:roma, aspect_ratio=:equal, clims=clim)
-heatmap(transpose(dlnV[:,:,31]), color=:roma, aspect_ratio=:equal, clims=clim)
-heatmap(transpose(dlnV[:,151,end:-1:1]), color=:roma, aspect_ratio=:equal, clims=clim)
-
-# Plot Sensitivities
-heatmap(transpose(sqrt.(InvParam.Velocity.up.RSJS[:,5,end:-1:1])), color=:viridis, aspect_ratio=:equal)
+# Write model to a VTK file
+write_model(ForwardModel, "PsiModel");
