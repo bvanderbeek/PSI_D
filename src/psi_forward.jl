@@ -442,7 +442,7 @@ end
 
 
 function return_kernel_parameters(Observation::SeismicObservable, Model::PsiModel, kernel_coordinates)
-    KernelParameters = return_kernel_parameters(Observation.Phase, Model, kernel_coordinates)
+    return return_kernel_parameters(Observation.Phase, Model, kernel_coordinates)
 end
 # RETURN KERNEL PARAMETERS: P-wave + Isotropic Velocity Parameters
 function return_kernel_parameters(::CompressionalWave, Model::PsiModel{<:IsotropicVelocity}, kernel_coordinates)
@@ -1030,7 +1030,7 @@ end
 function linearly_interpolate!(qv, x, v, qx; tf_extrapolate = false, tf_harmonic = false)
     # Point-wise linear interpolation
     for i in eachindex(qx)
-        qv[i] = linearly_interpolate(x, v, qx; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        qv[i] = linearly_interpolate(x, v, qx[i]; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
     end
 
     return nothing
@@ -1075,9 +1075,9 @@ function linear_weights(x::AbstractRange, qx::Number; tf_extrapolate = false, sc
     return (i₁, i₂), (w₁, w₂)
 end
 # Single query point interpolation
-function linearly_interpolate(x::AbstractRange, v, qx; tf_extrapolate = false, tf_harmonic = false)
+function linearly_interpolate(x::AbstractRange, v, qx::Number; tf_extrapolate = false, tf_harmonic = false)
     # Get linear interpolation weights for query point
-    wind, wval = linear_weights(x, qx[i]; tf_extrapolate = tf_extrapolate, scale = 1.0)
+    wind, wval = linear_weights(x, qx; tf_extrapolate = tf_extrapolate, scale = 1.0)
     # Return interpolated value as a weighted arithmetic (harmonic) average
     if tf_harmonic
         qv = 1.0/((wval[1]/v[wind[1]]) + (wval[2]/v[wind[2]]))

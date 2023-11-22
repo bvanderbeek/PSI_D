@@ -1,23 +1,59 @@
-function write_model(Model::PsiModel{<:HexagonalVectoralVelocity}, output_file::String)
+
+function write_model(output_file::String, Model::PsiModel{<:IsotropicVelocity}; vp_ref = nothing, vs_ref = nothing)
     # Define global coordinates
     xg, yg, zg = global_coordinate_arrays(Model.Mesh)
-    # Compute isotropic velocities
-    vp, vs = return_isotropic_velocities(Model.Parameters)
+    # Get velocity fields
+    vp, vs = return_velocity_fields(Model.Parameters)
+    # Write fractional velocity anomalies instead of absolute velocities
+    if ~isnothing(vp_ref)
+        vp = vp .- vp_ref
+        vp ./= vp_ref
+    end
+    if ~isnothing(vs_ref)
+        vs = vs .- vs_ref
+        vs ./= vs_ref
+    end
+
+    return write_model(output_file, xg, yg, zg, vp, vs, zeros(size(vp)), zeros(size(vp)), zeros(size(vp)), 0.0, 0.0, 0.0)
+end
+
+function write_model(output_file::String, Model::PsiModel{<:HexagonalVectoralVelocity}; tf_isotropic = true, vp_ref = nothing, vs_ref = nothing)
+    # Define global coordinates
+    xg, yg, zg = global_coordinate_arrays(Model.Mesh)
     # Define the global anisotropic vector
     sx, sy, sz = global_anisotropic_vector(Model)
+    # Return isotropic or Thomsen velocities
+    if tf_isotropic
+        vp, vs = return_isotropic_velocities(Model.Parameters)
+    else
+        vp, vs = return_velocity_fields(Model.Parameters)
+    end
+    # Write fractional velocity anomalies instead of absolute velocities
+    if ~isnothing(vp_ref)
+        vp = vp .- vp_ref
+        vp ./= vp_ref
+    end
+    if ~isnothing(vs_ref)
+        vs = vs .- vs_ref
+        vs ./= vs_ref
+    end
+
+    return write_model(output_file, xg, yg, zg, vp, vs, sx, sy, sz,
+    Model.Parameters.ratio_ϵ, Model.Parameters.ratio_η, Model.Parameters.ratio_γ)
+end
+function write_model(output_file, xg, yg, zg, vp, vs, sx, sy, sz, ratio_ϵ, ratio_η, ratio_γ)
     # Write the VTK file
     vtk_grid(output_file, xg, yg, zg) do vtk
         vtk["Vp"] = vp
         vtk["Vs"] = vs
         vtk["AnisotropicVector"] = (sx, sy, sz)
-        vtk["epsilon_ratio"] = Model.Parameters.ratio_ϵ
-        vtk["eta_ratio"] = Model.Parameters.ratio_η
-        vtk["gamma_ratio"] = Model.Parameters.ratio_γ
+        vtk["epsilon_ratio"] = ratio_ϵ
+        vtk["eta_ratio"] = ratio_η
+        vtk["gamma_ratio"] = ratio_γ
     end
 
     return nothing
 end
-
 
 function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity)
     vp = zeros(size(Parameters.f))
