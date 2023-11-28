@@ -335,11 +335,11 @@ end
 # PSI FORWARD: Vector of Observables + PSI Model
 # Assumption: Single observation type
 # Assumption: Kernel weight tuple has fixed names
-# Assumption: Lazy with element types; assumed Float64
+# Assumption: Lazy with element types; assumed equivalent to first the observation type
 function psi_forward(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Observable, P}
     # Allocate storage arrays
     n = length(Observations)
-    T = Float64
+    T = typeof(Observations[1].observation)
     predictions = Vector{T}(undef, n)
     relative_residuals = Vector{T}(undef, n)
     # Vector of kernels
@@ -370,7 +370,7 @@ end
 
 
 # RETURN KERNEL: TauP + Seismic Observable
-function return_kernel(::ForwardTauP, Observation::SeismicObservable, Model::PsiModel)
+function return_kernel(::ForwardTauP, Observation::T, Model::PsiModel) where {T <: SeismicObservable}
     # Compute the ray path
     ray_lon, ray_lat, ray_elv, ray_time = call_taup_path(Observation, Model)
     # Convert geographic coordinates to global coordinate Tuple
@@ -378,12 +378,16 @@ function return_kernel(::ForwardTauP, Observation::SeismicObservable, Model::Psi
     for (i, x) in enumerate(kernel_coordinates)
         kernel_coordinates[i] = geographic_to_global(x[1], x[2], x[3]; radius = Model.Mesh.Geometry.R₀)
     end
-    # Kernel weights
+    # Kernel weights defined using local ray orientations
     kernel_weights = return_ray_kernel_weights(kernel_coordinates)
+    for (i, w) in enumerate(kernel_weights)
+        azm, elv = ecef_to_local_orientation(ray_lon[i], ray_lat[i], w.azimuth, w.elevation)
+        kernel_weights[i] = (dr = w.dr, azimuth = azm, elevation = elv)
+    end
     # Kernel parameters interpolate_model_to_kernel()
     KernelParameters = return_kernel_parameters(Observation, Model, kernel_coordinates)
     # Kernel Static
-    if typeof(Observation) <: TravelTime
+    if T <: TravelTime
         kernel_static = [ray_time[1]]
     else
         kernel_static = [0.0]
@@ -391,6 +395,9 @@ function return_kernel(::ForwardTauP, Observation::SeismicObservable, Model::Psi
     # Add source and receiver statics
     kernel_static .+= get_source_static(Model.Sources.statics, Observation)
     kernel_static .+= get_receiver_static(Model.Receivers.statics, Observation)
+
+    # Kludge for splitting parameter statics which have not yet been defined
+    kernel_static = T <: SplittingParameters ? [(0.0, 0.0)] : kernel_static
 
     return ObservableKernel(Observation, KernelParameters, kernel_coordinates, kernel_weights, kernel_static)
 end
@@ -407,10 +414,9 @@ function return_ray_kernel_weights(ray_coordinates::Vector{NTuple{3, T}}) where 
     wj = sqrt(sum(dx.^2))
     # Half-weight for the first ray node
     dr_i = 0.5*wj
-    # Segement orientation --> Note component re-ordering for global coordinate system!
-    # (r₃, r₁, r₂) = (x, y, z)
-    azm_i = atan(dx[3], dx[2])
-    elv_i = atan(dx[1], sqrt((dx[2]^2) + (dx[3]^2)))
+    # Segement orientation
+    azm_i = atan(dx[2], dx[1])
+    elv_i = atan(dx[3], sqrt((dx[1]^2) + (dx[2]^2)))
     kernel_weights[1] = (dr = dr_i, azimuth = azm_i, elevation = elv_i)
     # Assign inner ray node weights
     for i in 2:(nw - 1)
@@ -419,11 +425,10 @@ function return_ray_kernel_weights(ray_coordinates::Vector{NTuple{3, T}}) where 
         wk = sqrt(sum(dx.^2))
         # Ray node weight is the average of its segment lengths
         dr_i = 0.5*(wj + wk)
-        # Segement orientation --> Note component re-ordering!
-        # (r₃, r₁, r₂) = (x, y, z)
+        # Segement orientation
         dx = ray_coordinates[i+1] .- ray_coordinates[i-1] # Use orientation for segment (i -1) to (i + 1)
-        azm_i = atan(dx[3], dx[2])
-        elv_i = atan(dx[1], sqrt((dx[2]^2) + (dx[3]^2)))
+        azm_i = atan(dx[2], dx[1])
+        elv_i = atan(dx[3], sqrt((dx[1]^2) + (dx[2]^2)))
         kernel_weights[i] = (dr = dr_i, azimuth = azm_i, elevation = elv_i)
         # Update segment length between nodes (i - 1) and i for next iteration
         wj = wk
@@ -431,10 +436,9 @@ function return_ray_kernel_weights(ray_coordinates::Vector{NTuple{3, T}}) where 
     dx = ray_coordinates[nw] .- ray_coordinates[nw-1]
     # Half-weight for last ray node
     dr_i = 0.5*sqrt(sum(dx.^2))
-    # Segement orientation --> Note component re-ordering!
-    # (r₃, r₁, r₂) = (x, y, z)
-    azm_i = atan(dx[3], dx[2])
-    elv_i = atan(dx[1], sqrt((dx[2]^2) + (dx[3]^2)))
+    # Segement orientation
+    azm_i = atan(dx[2], dx[1])
+    elv_i = atan(dx[3], sqrt((dx[1]^2) + (dx[2]^2)))
     kernel_weights[nw] = (dr = dr_i, azimuth = azm_i, elevation = elv_i)
 
     return kernel_weights
@@ -589,14 +593,8 @@ function interpolate_kernel_parameters!(KernelParameters::HexagonalVectoralVeloc
         end
         # Recover orientation
         if tf_interp_angles
-            # Rotate local symmetry axis vector to global coordinates
-            lon_lat_elv = global_to_geographic(qx_global[1], qx_global[2], qx_global[3]; radius =  Model.Mesh.Geometry.R₀)
-            s1, s2, s3 = local_to_global_vector((s1, s2, s3), lon_lat_elv, Model.Mesh.Geometry)
-            KernelParameters.azimuth[i] = atan(s3, s2) # Azimuth measured in North, East-plane
-            KernelParameters.elevation[i] = atan(s1, sqrt((s2^2) + (s3^2)))
-            # # The conversion when anisotropy angles are defined in global ECEF coordinates
-            # KernelParameters.azimuth[i] = atan(s2, s1)
-            # KernelParameters.elevation[i] = atan(s3, sqrt((s1^2) + (s2^2)))
+            KernelParameters.azimuth[i] = atan(s2, s1)
+            KernelParameters.elevation[i] = atan(s3, sqrt((s1^2) + (s2^2)))
         end
     end
 
@@ -606,10 +604,9 @@ end
 
 # EVALUATE KERNEL: Vector of ObservableKernel
 function evaluate_kernel(Kernels::Vector{<:ObservableKernel})
-    T = eltype(Kernels[1].static)
     nobs = length(Kernels)
-    predictions = zeros(T, nobs)
-    relative_residuals = zeros(T, nobs)
+    predictions = similar(Kernels[1].static, dims = (nobs,1))
+    relative_residuals = similar(Kernels[1].static, dims = (nobs,1))
     for (i, iKernel) in enumerate(Kernels)
         predictions[i], relative_residuals[i] = evaluate_kernel(iKernel)
     end
@@ -669,11 +666,11 @@ function kernel_phase_velocity(Phase::ShearWave, Kernel::ObservableKernel{T1, T2
     α, β, ϵ, δ, γ = return_thomsen_parameters(Kernel.Parameters, index)
     # Compute qS phase velocities
     if Kernel.Parameters.tf_exact
-        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation, Phase.paz,
-        Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ, δ, γ)
+        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+        Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ, δ, γ)
     else
-        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation, Phase.paz,
-        Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
+        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+        Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
     end
     # Effective anisotropic shear slowness
     uq = (1.0/vqs2) - ((1.0/vqs2) - (1.0/vqs1))*(cos(ζ)^2)
@@ -685,11 +682,11 @@ function kernel_splitting_intensity(Phase::ShearWave, Kernel::ObservableKernel{T
     α, β, ϵ, δ, γ = return_thomsen_parameters(Kernel.Parameters, index)
     # Compute qS phase velocities
     if Kernel.Parameters.tf_exact
-        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation, Phase.paz,
-        Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ, δ, γ)
+        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+        Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ, δ, γ)
     else
-        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation, Phase.paz,
-        Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
+        vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+        Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
     end
     # Splitting Intensity
     si = 0.5*((1.0/vqs2) - (1.0/vqs1))*sin(2.0*ζ)
@@ -724,19 +721,9 @@ function qp_phase_velocity_thomsen(propagation_azimuth, propagation_elevation, s
 
     return vqp, cosθ
 end
-function qs_phase_velocities_thomsen(propagation_azimuth, propagation_elevation, polarization_azimuth,
+function qs_phase_velocities_thomsen(propagation_azimuth, propagation_elevation, qt_polarization,
     symmetry_azimuth, symmetry_elevation, α, β, η, γ)
 
-    # The polarization angle in the ray-normal QT-plane. Here it is assumed that 'paz' is the polariszation azimuth
-    # measured in the global reference frame (i.e. angle in East,North- or YZ-plane) at the receiver. In this case,
-    # subtracting the ray azmiuth at the receiver gives the polarization angle in the QT-plane which is assumed constant
-    # along the ray. An older and I beleive incorrect version of this correction was,
-    #   qt_polarization'(x) = qt_polarization + 270 - source_backazimuth(x) - ray_azimuth(x)
-    # where 'x' referes to the along-ray position and qt_polarization was measured in a QTL-coordinate system where the
-    # Q-axis paralleled the source backazimuth at the receiver. This expression can give variable qt_polarization angles
-    # along the ray which I think is incorrect. This also implies that the polarisation is constant with respect to the
-    # source back-azimuth along the ray...which I don't think makes sense?
-    qt_polarization = polarization_azimuth - propagation_azimuth
     # Compute angle between propagation direction and symmetry axis
     cosθ, ζ = symmetry_axis_cosine(symmetry_azimuth, symmetry_elevation, propagation_azimuth, propagation_elevation, qt_polarization)
     cosθ_2 = cosθ^2
@@ -750,11 +737,9 @@ function qs_phase_velocities_thomsen(propagation_azimuth, propagation_elevation,
 
     return vqs1, vqs2, cosθ, ζ
 end
-function qs_phase_velocities_thomsen(propagation_azimuth, propagation_elevation, polarization_azimuth,
+function qs_phase_velocities_thomsen(propagation_azimuth, propagation_elevation, qt_polarization,
     symmetry_azimuth, symmetry_elevation, α, β, ϵ, δ, γ)
 
-    # The polarization angle in the ray-normal QT-plane.
-    qt_polarization = polarization_azimuth - propagation_azimuth
     # Compute angle between propagation direction and symmetry axis
     cosθ, ζ = symmetry_axis_cosine(symmetry_azimuth, symmetry_elevation, propagation_azimuth, propagation_elevation, qt_polarization)
     cosθ_2 = cosθ^2

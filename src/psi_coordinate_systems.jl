@@ -186,6 +186,23 @@ function ecef_vector(east_north_elv::NTuple{3, T}, latitude, longitude) where {T
     return sx, sy, sz
 end
 
+function ecef_to_local_orientation(lon_deg, lat_deg, azm_rad, elv_rad)
+    c = π/180.0
+    # Directional unit vector in the ECEF coordinate system
+    sinα, cosα = sincos(azm_rad)
+    sinβ, cosβ = sincos(elv_rad)
+    u = @SVector [cosβ*cosα, cosβ*sinα, sinβ]
+    # Rotation matrix that brings us from (Lat, Lon) to (0°N, 0°E)
+    Rm = rotation_matrix((-c*lon_deg, c*lat_deg),(3, 2))
+    # Local directional vector
+    v = Rm*u
+    # Local azimuth and elevation
+    azm = atan(v[3], v[2]) # East-North Plane
+    elv = atan(v[1], sqrt( (v[2]^2) + (v[3]^2) )) # Angle from horizontal plane
+
+    return azm, elv
+end
+
 
 
 # GEODESIC FUNCTIONS

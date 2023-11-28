@@ -218,7 +218,7 @@ function build_receivers(f; dlm = ",", data_type = Float64)
         elv = parse(data_type, line[4])
         coordinates[k] = (lon, lat, elv)
     end
-
+    
     return SeismicReceivers(id, coordinates)
 end
 
