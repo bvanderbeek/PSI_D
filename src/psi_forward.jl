@@ -605,8 +605,8 @@ end
 # EVALUATE KERNEL: Vector of ObservableKernel
 function evaluate_kernel(Kernels::Vector{<:ObservableKernel})
     nobs = length(Kernels)
-    predictions = similar(Kernels[1].static, dims = (nobs,1))
-    relative_residuals = similar(Kernels[1].static, dims = (nobs,1))
+    predictions = similar(Kernels[1].static, nobs)
+    relative_residuals = similar(Kernels[1].static, nobs)
     for (i, iKernel) in enumerate(Kernels)
         predictions[i], relative_residuals[i] = evaluate_kernel(iKernel)
     end
