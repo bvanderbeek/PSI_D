@@ -574,10 +574,9 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector
     x_global = Kernel.coordinates[index]
     x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
     x_geo = global_to_geographic(x_global[1], x_global[2], x_global[3]; radius = PerturbationModel.A.Mesh.Geometry.R₀)
-    # Propagation and symmetry axis orientations in the local coordinate system
-    # The AzRad-Vector is always defined with respect to the plane tanget to the Earth's surface at a given point
-    pazm, pelv = global_to_local_angles(Kernel.weights[index].azimuth, Kernel.weights[index].elevation, x_geo, PerturbationModel.A.Mesh.Geometry) # Propagation direction
-    sazm, selv = global_to_local_angles(Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], x_geo, PerturbationModel.A.Mesh.Geometry) # Symmetry axis
+    # Propagation and symmetry axis orientations in the local geographic coordinate system
+    pazm, pelv = (Kernel.weights[index].azimuth, Kernel.weights[index].elevation)
+    sazm, selv = (Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index])
 
     # Extract relevant parameters
     α = Kernel.Parameters.α[index] # Reference symmetry axis velocity
@@ -609,7 +608,7 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector
     dtdA, dtdB, dtdC = (dtdv*dvdA, dtdv*dvdB, dtdv*dvdC)
 
     # Map partial derivatives to inversion parameters
-    if x_geo[3] > -500.0 # Squeezing!
+    if sum(x -> x^2, x_global) > (PerturbationModel.A.Mesh.Geometry.R₀ - 500.0) # Squeezing!
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.A.Mesh, x_local, dtdA, PerturbationModel.A.jcol[1])
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.B.Mesh, x_local, dtdB, PerturbationModel.B.jcol[1])
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.C.Mesh, x_local, dtdC, PerturbationModel.C.jcol[1])
@@ -1380,11 +1379,9 @@ function update_kernel!(Kernel::ObservableKernel{B, P}, PerturbationModel::Inver
     # Update kernel elements
     for (i, x_global) in enumerate(Kernel.coordinates)
         # Coordinate System Conversions
-        x_geo = global_to_geographic(x_global[1], x_global[2], x_global[3]; radius = PerturbationModel.A.Mesh.Geometry.R₀)
         x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
-        # Symmetry axis orientations in the local coordinate system
-        # The AzRad-Vector is always defined with respect to the plane tanget to the Earth's surface at a given point
-        sazm, selv = global_to_local_angles(Kernel.Parameters.azimuth[i], Kernel.Parameters.elevation[i], x_geo, PerturbationModel.A.Mesh.Geometry) # Symmetry axis
+        # Symmetry axis orientations in the local geographic coordinate system
+        sazm, selv = (Kernel.Parameters.azimuth[i], Kernel.Parameters.elevation[i])
 
         # Interpolate incremental perturbations
         dda = linearly_interpolate(PerturbationModel.A.Mesh.x, PerturbationModel.A.ddm, x_local;
@@ -1395,8 +1392,6 @@ function update_kernel!(Kernel::ObservableKernel{B, P}, PerturbationModel::Inver
         tf_extrapolate = false, tf_harmonic = false)
         # Compute new AzRad vector parameters
         f, sazm, selv = update_azrad_vector(Kernel.Parameters.f[i], sazm, selv, dda, ddb, ddc)
-        # Convert local to global angles
-        sazm, selv = local_to_global_angles(sazm, selv, x_geo, PerturbationModel.A.Mesh.Geometry)
 
         # Update kernel anisotropy parameters
         Kernel.Parameters.f[i] = f
