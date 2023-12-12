@@ -98,3 +98,68 @@ function global_anisotropic_vector(Model::PsiModel{<:HexagonalVectoralVelocity})
 
     return sx, sy, sz
 end
+
+
+# NEED TO BE CHECKED
+
+# Write Model
+function write_psi_structure(out_file, Parameters, Mesh::RegularGrid)
+    fid = open(out_file, "w")
+    print_header(fid, Mesh)
+    for (k, zk) in enumerate(Mesh.x[3])
+        for (j, yj) in enumerate(Mesh.x[2])
+            for (i, xi) in enumerate(Mesh.x[1])
+                print_parameters(fid, (xi, yj, zk), Parameters)
+            end
+        end
+    end
+    close(fid)
+
+    return nothing
+end
+function print_header(fid, Mesh)
+    print_geometry(fid, Mesh.Geometry)
+    print_mesh(fid, Mesh)
+    return nothing
+end
+function print_geometry(fid, Geometry::LocalGeographic)
+    println(fid, Geometry.R₀,", ",Geometry.λ₀,", ",Geometry.ϕ₀,", ",Geometry.β)
+    return nothing
+end
+function print_mesh(fid, Mesh::RegularGrid)
+    n1, n2, n3 = size(Mesh)
+    println(fid, n1,", ",n2,", ",n3)
+    println(fid, Mesh.x[1][1],", ",Mesh.x[2][1],", ",Mesh.x[3][1],", ",Mesh.x[1][end],", ",Mesh.x[2][end],", ",Mesh.x[3][end])
+    return nothing
+end
+function print_parameters(fid, n, coords, Parameters::HexagonalVectoralVelocity)
+    α, β, ϵ, δ, γ = return_thomsen_parameters(Parameters, n)
+    println(fid, coords[1],", ",coords[2],", ",coords[3],", ",α,", ",β,", ",ϵ,", ",δ,", ",γ,", ",
+    Parameters.azimuth[n],", ",Parameters.elevation[n])
+    return nothing
+end
+# Write Observations
+function write_psi_structure(out_file, Observations::Vector{<:Observable})
+    fid = open(out_file, "w")
+    for obs in Observations
+        print_observation(fid, obs)
+    end
+    close(fid)
+
+    return nothing
+end
+function write_psi_structure(out_file, Observations::Vector{<:Observable}, predictions)
+    fid = open(out_file, "w")
+    for (i, obs) in enumerate(Observations)
+        print_observation(fid, obs; observation = predictions[i])
+    end
+    close(fid)
+
+    return nothing
+end
+function print_observation(fid, SP::SplittingParameters; observation = SP.observation)
+    println(fid, observation[1],", ",observation[2],", ",SP.error[1],", ",SP.error[2],", ", 
+    SP.Phase.period,", ",SP.Phase.name,", ",SP.source_id,", ",SP.receiver_id,", ","Q",", ",SP.Phase.paz)
+
+    return nothing
+end

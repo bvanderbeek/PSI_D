@@ -306,6 +306,16 @@ struct SplittingIntensity{P, F, S, R, T} <: SeismicObservable
     error::T
 end
 
+# Splitting Parameters
+struct SplittingParameters{P, F, S, R, T} <: SeismicObservable
+    Phase::P
+    Forward::F
+    source_id::S
+    receiver_id::R
+    observation::T
+    error::T
+end
+
 struct ObservableKernel{B<:Observable, P<:ModelParameterization, C, W, T}
     Observation::B
     Parameters::P

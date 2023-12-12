@@ -563,6 +563,38 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSl
 
     return nothing
 end
+# Differentiate HexagonalVectoralVelocity S-wave Travel-Time with respect to IsotropicSlowness
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:TravelTime{<:ShearWave}, <:HexagonalVectoralVelocity}, index)
+    if PerturbationModel.coupling_option == 0
+        # Invarient Isotropic S-velocity
+        _, β₀ = return_isotropic_velocities(Kernel.Parameters, index)
+        # Extract Thomsen Parameters
+        α, β, ϵ, δ, γ = return_thomsen_parameters(Kernel.Parameters, index)
+        # Compute qS phase velocities
+        if Kernel.Parameters.tf_exact
+            vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+            Kernel.Observation.Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ, δ, γ)
+        else
+            vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+            Kernel.Observation.Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
+        end
+        # Isotropic slowness derivative
+        dtdu = Kernel.weights[index].dr*( (β₀/vqs2) + ( (2.0*β*β₀/(vqs1^2)) - (β₀/vqs1) - (β₀/vqs2) )*(cos(ζ)^2) )
+        # Kernel coordinates in perturbational mesh coordinate system
+        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Us.Mesh.Geometry)
+        # Map partial derivatives to inversion parameters
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local, dtdu, PerturbationModel.Us.jcol[1])
+    else
+        error("Unrecognized coupling option!")
+    end
+
+    return nothing
+end
+# Differentiate HexagonalVectoralVelocity S-wave SplittingIntensity with respect to IsotropicSlowness
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:SplittingIntensity{<:ShearWave}, <:HexagonalVectoralVelocity}, index)
+    # Ignoring weak sensitivity of splitting intensity to isotropic velocity
+    return nothing
+end
 # Differentiate HexagonalVectoralVelocity P-wave Travel-Time with respect to InverseAzRadVector
 function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector, Kernel::ObservableKernel{<:TravelTime{<:CompressionalWave}, <:HexagonalVectoralVelocity}, index)
     # Currently assuming anisotropic parameters are all defined on the same mesh
@@ -573,7 +605,6 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector
     # Coordinate System Conversions
     x_global = Kernel.coordinates[index]
     x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
-    x_geo = global_to_geographic(x_global[1], x_global[2], x_global[3]; radius = PerturbationModel.A.Mesh.Geometry.R₀)
     # Propagation and symmetry axis orientations in the local geographic coordinate system
     pazm, pelv = (Kernel.weights[index].azimuth, Kernel.weights[index].elevation)
     sazm, selv = (Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index])
@@ -608,13 +639,107 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector
     dtdA, dtdB, dtdC = (dtdv*dvdA, dtdv*dvdB, dtdv*dvdC)
 
     # Map partial derivatives to inversion parameters
-    if sum(x -> x^2, x_global) > (PerturbationModel.A.Mesh.Geometry.R₀ - 500.0) # Squeezing!
+    if sqrt(sum(x -> x^2, x_global)) > (PerturbationModel.A.Mesh.Geometry.R₀ - 500.0) # Squeezing!
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.A.Mesh, x_local, dtdA, PerturbationModel.A.jcol[1])
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.B.Mesh, x_local, dtdB, PerturbationModel.B.jcol[1])
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.C.Mesh, x_local, dtdC, PerturbationModel.C.jcol[1])
     end
 
     return nothing
+end
+# Differentiate HexagonalVectoralVelocity S-wave Travel-Time with respect to InverseAzRadVector
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector, Kernel::ObservableKernel{<:TravelTime{<:ShearWave}, <:HexagonalVectoralVelocity}, index)
+    # Local perturbational mesh coordinates
+    x_global = Kernel.coordinates[index]
+    x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
+    # Sensitivity of qS-phase velocities to anisotropic parameters
+    du1dABC, du2dABC, dζdABC_Δu₁₂, ζ = differentiate_qs_velocities(PerturbationModel, Kernel, index)
+    # The travel-time partial derivatives; Eq. A23 of VanderBeek et al. (GJI 2023)
+    sin2ζ, cos2ζ = sincos(2.0*ζ)
+    cosζ_2 = 0.5*(cos2ζ + 1.0)
+    dtdA = Kernel.weights[index].dr*( du2dABC[1] + (du1dABC[1] - du2dABC[1])*cosζ_2 - dζdABC_Δu₁₂[1]*sin2ζ )
+    dtdB = Kernel.weights[index].dr*( du2dABC[2] + (du1dABC[2] - du2dABC[2])*cosζ_2 - dζdABC_Δu₁₂[2]*sin2ζ )
+    dtdC = Kernel.weights[index].dr*( du2dABC[3] + (du1dABC[3] - du2dABC[3])*cosζ_2 - dζdABC_Δu₁₂[3]*sin2ζ )
+    # Map partial derivatives to inversion parameters
+    if sqrt(sum(x -> x^2, x_global)) > (PerturbationModel.A.Mesh.Geometry.R₀ - 500.0) # Squeezing!
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.A.Mesh, x_local, dtdA, PerturbationModel.A.jcol[1])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.B.Mesh, x_local, dtdB, PerturbationModel.B.jcol[1])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.C.Mesh, x_local, dtdC, PerturbationModel.C.jcol[1])
+    end
+
+    return nothing
+end
+# Differentiate HexagonalVectoralVelocity S-wave SplittingIntensity with respect to InverseAzRadVector
+function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseAzRadVector, Kernel::ObservableKernel{<:SplittingIntensity{<:ShearWave}, <:HexagonalVectoralVelocity}, index)
+    # Local perturbational mesh coordinates
+    x_global = Kernel.coordinates[index]
+    x_local = global_to_local(x_global[1], x_global[2], x_global[3], PerturbationModel.A.Mesh.Geometry)
+    # Sensitivity of qS-phase velocities to anisotropic parameters
+    du1dABC, du2dABC, dζdABC_Δu₁₂, ζ = differentiate_qs_velocities(PerturbationModel, Kernel, index)
+    # Splitting intensity partial derivatives; Eq. A24 of VanderBeek et al. (GJI 2023)
+    sin2ζ, cos2ζ = sincos(2.0*ζ)
+    dtdA = 0.5*Kernel.weights[index].dr*( (du2dABC[1] - du1dABC[1])*sin2ζ - 2.0*dζdABC_Δu₁₂[1]*cos2ζ )
+    dtdB = 0.5*Kernel.weights[index].dr*( (du2dABC[2] - du1dABC[2])*sin2ζ - 2.0*dζdABC_Δu₁₂[2]*cos2ζ )
+    dtdC = 0.5*Kernel.weights[index].dr*( (du2dABC[3] - du1dABC[3])*sin2ζ - 2.0*dζdABC_Δu₁₂[3]*cos2ζ )
+    # Map partial derivatives to inversion parameters
+    if sqrt(sum(x -> x^2, x_global)) > (PerturbationModel.A.Mesh.Geometry.R₀ - 500.0) # Squeezing!
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.A.Mesh, x_local, dtdA, PerturbationModel.A.jcol[1])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.B.Mesh, x_local, dtdB, PerturbationModel.B.jcol[1])
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.C.Mesh, x_local, dtdC, PerturbationModel.C.jcol[1])
+    end
+
+    return nothing
+end
+function differentiate_qs_velocities(PerturbationModel::InverseAzRadVector, Kernel::ObservableKernel{<:SeismicObservable, <:HexagonalVectoralVelocity}, index)
+    # Currently assuming anisotropic parameters are all defined on the same mesh
+    if (PerturbationModel.A.Mesh.Geometry != PerturbationModel.B.Mesh.Geometry) ||
+        (PerturbationModel.A.Mesh.Geometry != PerturbationModel.C.Mesh.Geometry)
+        error("Mesh Geometry for InverseHexagonalVector_VF2021 must be equivalent")
+    end
+    # Propagation and symmetry axis orientations in the local geographic coordinate system
+    pazm, pelv = (Kernel.weights[index].azimuth, Kernel.weights[index].elevation)
+    sazm, selv = (Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index])
+    # Invarient Isotropic S-velocity
+    α₀, β₀ = return_isotropic_velocities(Kernel.Parameters, index)
+    # Extract Thomsen Parameters
+    α, β, ϵ, δ, γ = return_thomsen_parameters(Kernel.Parameters, index)
+    rϵ, rη, rγ = return_anisotropic_ratios(Kernel.Parameters, index)
+    f = Kernel.Parameters.f[index] # Anisotropic strength
+    # Compute qS phase velocities
+    if Kernel.Parameters.tf_exact
+        v1, v2, cosΔ, ζ = qs_phase_velocities_thomsen(pazm, pelv, Kernel.Observation.Phase.paz, sazm, selv, α, β, ϵ, δ, γ)
+    else
+        v1, v2, cosΔ, ζ = qs_phase_velocities_thomsen(pazm, pelv, Kernel.Observation.Phase.paz, sazm, selv, α, β, ϵ - δ, γ)
+    end
+    # Symmetry axis partial derivatives
+    dαdf = -(2/15)*((α^3)/(α₀^2))*(5.0*rϵ - rη)
+    dβdf = -rγ*(β^3)/(3.0*(β₀^2))
+    dsdA, dsdB, dsdC = differentiate_symmetry_axis_product(pazm, pelv, sazm, selv, f)
+    dfdA, dfdB, dfdC = differentiate_anisotropic_strength(sazm, selv, f)
+    # The qS'-slowness partial derivatives
+    cosΔ_2, cosΔ_4 = (cosΔ^2, cosΔ^4)
+    du1dv1 = -1.0/(v1^2)
+    du1dA = du1dv1*( ((α^2)/β)*rη*(dsdA - 2.0*cosΔ_2*dsdA + cosΔ_4*dfdA) + (2.0 - (v1/β))*dβdf*dfdA + 2.0*((v1 - β)/α)*dαdf*dfdA )
+    du1dB = du1dv1*( ((α^2)/β)*rη*(dsdB - 2.0*cosΔ_2*dsdB + cosΔ_4*dfdB) + (2.0 - (v1/β))*dβdf*dfdB + 2.0*((v1 - β)/α)*dαdf*dfdB )
+    du1dC = du1dv1*( ((α^2)/β)*rη*(dsdC - 2.0*cosΔ_2*dsdC + cosΔ_4*dfdC) + (2.0 - (v1/β))*dβdf*dfdC + 2.0*((v1 - β)/α)*dαdf*dfdC )
+    # The qS''-slowness partials derivatives
+    du2dv2 = -1.0/(v2^2)
+    du2dA = du2dv2*( β*rγ*(dfdA - dsdA) + (v2/β)*dβdf*dfdA )
+    du2dB = du2dv2*( β*rγ*(dfdB - dsdB) + (v2/β)*dβdf*dfdB )
+    du2dC = du2dv2*( β*rγ*(dfdC - dsdC) + (v2/β)*dβdf*dfdC )
+    # Polarization sensitivity
+    sinϕ, cosϕ = sincos(pazm)
+    sinθ, cosθ = sincos(pelv)
+    sinψ, cosψ = sincos(sazm)
+    sinλ, cosλ = sincos(selv)
+    sin2ψ, cos2ψ = (2.0*sinψ*cosψ, 2.0*(cosψ^2) - 1.0)
+    tanλ = conditioned_tangent(sinλ, cosλ; e = 64)
+    # The terms (∂ζ/∂m)*(u' - u''); Eq. A43 - A45 of VanderBeek et al. (GJI 2023)
+    dζdA_Δu₁₂ = 0.5*(cosθ*tanλ*(sinψ*cosϕ + cosψ*sinϕ) - sinθ*sin2ψ)*(rγ - ((α/β)^2)*rη*cosΔ_2)/β
+    dζdB_Δu₁₂ = 0.5*(sinθ*cos2ψ - cosθ*tanλ*(cosψ*cosϕ - sinψ*sinϕ))*(rγ - ((α/β)^2)*rη*cosΔ_2)/β
+    dζdC_Δu₁₂ = sqrt(f)*cosθ*cosλ*(sinψ*cosϕ - cosψ*sinϕ)*(rγ - ((α/β)^2)*rη*cosΔ_2)/β
+
+    return (du1dA, du1dB, du1dC), (du2dA, du2dB, du2dC), (dζdA_Δu₁₂, dζdB_Δu₁₂, dζdC_Δu₁₂), ζ
 end
 # Compute the partial derivatives ∂(fcos²x)/∂m for m = (A, B, C) where f is the anisotropic magnitude and x is
 # the angle between the propagation direction and symmetry axis; Equations A37-A39 of VanderBeek et al. (GJI 2023)
@@ -631,11 +756,7 @@ function differentiate_symmetry_axis_product(ray_azm, ray_elv, sym_azm, sym_elv,
     cos2ψ = 2.0*(cosψ^2) - 1.0
     sin2ψ = 2.0*sinψ*cosψ
     # Define tanλ such that it does not go to infinity
-    e = 64 # Increase 'k', increase max amplitude and roll-off of tangent discontinuity
-    k = 0.5*pi
-    λ = atan(sinλ/cosλ) # Place on interval [-pi/2,pi/2]
-    λ = (2*((k^e)/((k^e) + (λ^e))) - 1)*λ
-    tanλ = tan(λ)
+    tanλ = conditioned_tangent(sinλ, cosλ; e = 64)
     # Partial derivatives with respect to the azimuthal and vertical components
     # Equations A37-A39 of VanderBeek et al. (GJI 2023)
     dsdA = (cos2ϕ + cos2ψ)*(cosθ^2) + (cosϕ*cosψ - sinϕ*sinψ)*tanλ*sin2θ
@@ -643,6 +764,12 @@ function differentiate_symmetry_axis_product(ray_azm, ray_elv, sym_azm, sym_elv,
     dsdC = sqrt(f)*( 4.0*sinλ*(sinθ^2) + 2.0*(cosϕ*cosψ + sinϕ*sinψ)*cosλ*sin2θ )
     # Note the factor of 0.5! A factor of 2 was included in Eq. A37-A39 that we do not want here
     return 0.5*dsdA, 0.5*dsdB, 0.5*dsdC
+end
+function conditioned_tangent(y, x; e = 64)
+    k = 0.5*π
+    λ = atan(y/x) # Place on interval [-pi/2,pi/2]
+    λ = (2*((k^e)/((k^e) + (λ^e))) - 1)*λ
+   return tan(λ)
 end
 # Compute the partial derivatives ∂f/∂m for m = (A, B, C) where the anisotropic magnitude, f = √(A² + B²) + C²
 # Equations A33-A34 of VanderBeek et al. (GJI 2023)
