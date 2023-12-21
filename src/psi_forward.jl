@@ -349,15 +349,16 @@ end
 function psi_forward(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Observable, P}
     # Allocate storage arrays
     n = length(Observations)
-    T = typeof(Observations[1].observation)
-    predictions = Vector{T}(undef, n)
-    relative_residuals = Vector{T}(undef, n)
+    val_type = eltype(Model.Mesh.x[1]) # Type assumed for model parameter and coordinate values
+    obs_type = typeof(Observations[1].observation) # Type that stores an observation
+    predictions = Vector{obs_type}(undef, n)
+    relative_residuals = Vector{obs_type}(undef, n)
     # Vector of kernels
-    param_type = return_kernel_parameter_type(P, T) # Element type used for parameters is the observation data type!
-    coord_type = Vector{NTuple{ndims(Model.Mesh), typeof(Model.Mesh.x[1][1])}}
-    weight_type = Vector{NamedTuple{(:dr, :azimuth, :elevation), NTuple{3, T}}} # Assuming fixed names for weights!
-    Kernels = Vector{ObservableKernel{B, param_type, coord_type, weight_type, Vector{T}}}(undef, n)
-    # Alternatively, just compute one kernel to get the type, e.g.,
+    param_type = return_kernel_parameter_type(P, val_type)
+    coord_type = Vector{NTuple{ndims(Model.Mesh), val_type}}
+    weight_type = Vector{NamedTuple{(:dr, :azimuth, :elevation), NTuple{3, val_type}}} # Assuming fixed names for weights!
+    Kernels = Vector{ObservableKernel{B, param_type, coord_type, weight_type, Vector{obs_type}}}(undef, n)
+    # Lazy way is to just compute one kernel to get the type, e.g.,
     #   a_prediction, a_relative_residual, a_Kernel = psi_forward(Observations[1], Model)
     #   Kernels = Vector{typeof(a_Kernel)}(undef, n)
 
