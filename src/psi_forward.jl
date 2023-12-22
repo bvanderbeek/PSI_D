@@ -345,7 +345,6 @@ end
 # PSI FORWARD: Vector of Observables + PSI Model
 # Assumption: Single observation type
 # Assumption: Kernel weight tuple has fixed names
-# Assumption: Lazy with element types; assumed equivalent to first the observation type
 function psi_forward(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Observable, P}
     # Allocate storage arrays
     n = length(Observations)
@@ -398,19 +397,15 @@ function return_kernel(::ForwardTauP, Observation::T, Model::PsiModel) where {T 
     # Kernel parameters interpolate_model_to_kernel()
     KernelParameters = return_kernel_parameters(Observation, Model, kernel_coordinates)
     # Kernel Static
-    if T <: TravelTime
-        kernel_static = [ray_time[1]]
-    else
-        kernel_static = [0.0]
-    end
-    # Add source and receiver statics
-    kernel_static .+= get_source_static(Model.Sources.statics, Observation)
-    kernel_static .+= get_receiver_static(Model.Receivers.statics, Observation)
-
-    # Kludge for splitting parameter statics which have not yet been defined
-    kernel_static = T <: SplittingParameters ? [(0.0, 0.0)] : kernel_static
+    kernel_static = return_kernel_static(Observation, Model)
+    T <: TravelTime ? kernel_static[1] += ray_time[1] : nothing
 
     return ObservableKernel(Observation, KernelParameters, kernel_coordinates, kernel_weights, kernel_static)
+end
+function return_kernel_static(Observation, Model)
+    kernel_static = get_source_static(Model.Sources.statics, Observation)
+    kernel_static = kernel_static .+ get_receiver_static(Model.Receivers.statics, Observation)
+    return [kernel_static]
 end
 
 # RETURN RAY KERNEL WEIGHTS: Ray segment lengths and orientations for any source-to-receiver path
@@ -798,7 +793,7 @@ function get_source_static(δ::Dict, b::Observable)
     if haskey(δ, k)
         δₖ = δ[k]
     else
-        δₖ = zero(valtype(δ))
+        δₖ = return_null_static(b)
     end
 
     return δₖ
@@ -810,10 +805,16 @@ function get_receiver_static(δ::Dict, b::Observable)
         δₖ = δ[k]
     else
         # println("No Static for key: ", k)
-        δₖ = zero(valtype(δ))
+        δₖ = return_null_static(b)
     end
 
     return δₖ
+end
+function return_null_static(b::SeismicObservable)
+    return zero(eltype(b.observation))
+end
+function return_null_static(b::SplittingParameters)
+    return (zero(eltype(b.observation)), zero(eltype(b.observation)))
 end
 
 
