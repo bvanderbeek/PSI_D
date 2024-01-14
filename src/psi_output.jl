@@ -1,70 +1,108 @@
 
-function write_model(output_file::String, Model::PsiModel{<:IsotropicVelocity}; vp_ref = nothing, vs_ref = nothing)
-    # Define global coordinates
-    xg, yg, zg = global_coordinate_arrays(Model.Mesh)
-    # Get velocity fields
-    vp, vs = return_velocity_fields(Model.Parameters)
-    # Write fractional velocity anomalies instead of absolute velocities
-    if ~isnothing(vp_ref)
-        vp = vp .- vp_ref
-        vp ./= vp_ref
-    end
-    if ~isnothing(vs_ref)
-        vs = vs .- vs_ref
-        vs ./= vs_ref
-    end
-
-    return write_model(output_file, xg, yg, zg, vp, vs, zeros(size(vp)), zeros(size(vp)), zeros(size(vp)), 0.0, 0.0, 0.0)
-end
-
-function write_model(output_file::String, Model::PsiModel{<:HexagonalVectoralVelocity}; tf_isotropic = true, vp_ref = nothing, vs_ref = nothing)
+# Write PsiModel{<:IsotropicVelocity} to VTK-file 
+function write_model_to_vtk(output_file::String, Model::PsiModel{<:IsotropicVelocity}; vp_ref = nothing, vs_ref = nothing)
     # Define global coordinates
     xg, yg, zg = global_coordinate_arrays(Model.Mesh)
     # Define the global anisotropic vector
     sx, sy, sz = global_anisotropic_vector(Model)
-    # Return isotropic or Thomsen velocities
-    if tf_isotropic
-        vp, vs = return_isotropic_velocities(Model.Parameters)
-    else
-        vp, vs = return_velocity_fields(Model.Parameters)
-    end
-    # Write fractional velocity anomalies instead of absolute velocities
-    if ~isnothing(vp_ref)
-        vp = vp .- vp_ref
-        vp ./= vp_ref
-    end
-    if ~isnothing(vs_ref)
-        vs = vs .- vs_ref
-        vs ./= vs_ref
-    end
-
-    return write_model(output_file, xg, yg, zg, vp, vs, sx, sy, sz,
-    Model.Parameters.ratio_ϵ, Model.Parameters.ratio_η, Model.Parameters.ratio_γ)
-end
-function write_model(output_file, xg, yg, zg, vp, vs, sx, sy, sz, ratio_ϵ, ratio_η, ratio_γ)
-    # Write the VTK file
+    # Write VTK file
     vtk_grid(output_file, xg, yg, zg) do vtk
-        vtk["Vp"] = vp
-        vtk["Vs"] = vs
-        vtk["AnisotropicVector"] = (sx, sy, sz)
-        vtk["epsilon_ratio"] = ratio_ϵ
-        vtk["eta_ratio"] = ratio_η
-        vtk["gamma_ratio"] = ratio_γ
+        !isnothing(vp_ref) ? vtk["Vp_ref"] = vp_ref : nothing
+        !isnothing(vs_ref) ? vtk["Vs_ref"] = vs_ref : nothing
+        vtk["Vp"] = Model.vp
+        vtk["Vs"] = Model.vs
     end
 
     return nothing
 end
-
-function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity)
-    vp = zeros(size(Parameters.f))
-    vs = zeros(size(Parameters.f))
-    for i in eachindex(Parameters.f)
-        vp[i], vs[i] = return_isotropic_velocities(Parameters, i)
+# Write PsiModel{<:HexagonalVectoralVelocity} to VTK-file 
+function write_model_to_vtk(output_file::String, Model::PsiModel{<:HexagonalVectoralVelocity};
+    vp_ref = nothing, vs_ref = nothing, tf_isotropic_velocities = true)
+    # Define global 3D coordinate arrays
+    xg, yg, zg = global_coordinate_arrays(Model.Mesh)
+    # Define velocities to write
+    vp, vs = tf_isotropic_velocities ? return_isotropic_velocities(Model.Parameters) : return_velocity_fields(Model.Parameters)
+    # Define the global anisotropic vector
+    sx, sy, sz = global_anisotropic_vector(Model)
+    # Write VTK file
+    vtk_grid(output_file, xg, yg, zg) do vtk
+        !isnothing(vp_ref) ? vtk["Vp_ref"] = vp_ref : nothing
+        !isnothing(vs_ref) ? vtk["Vs_ref"] = vs_ref : nothing
+        vtk["Vp"] = vp
+        vtk["Vs"] = vs
+        vtk["AniVec"] = (sx, sy, sz)
+        vtk["epsilon_ratio"] = Model.Parameters.ratio_ϵ
+        vtk["eta_ratio"] = Model.Parameters.ratio_η
+        vtk["gamma_ratio"] = Model.Parameters.ratio_γ
     end
 
-    return vp, vs
+    return nothing
 end
+function write_sampling_to_vtk(output_directory::String, PerturbationModel::SeismicPerturbationModel)
+    if !isnothing(PerturbationModel.Interface)
+        write_sampling_to_vtk(output_directory, PerturbationModel.Interface)
+    end
+    if !isnothing(PerturbationModel.Velocity)
+        write_sampling_to_vtk(output_directory, PerturbationModel.Velocity)
+    end
 
+    return nothing
+end
+function write_sampling_to_vtk(output_directory::String, Velocity::InverseSeismicVelocity)
+    if !isnothing(Velocity.Isotropic)
+        write_sampling_to_vtk(output_directory, Velocity.Isotropic)
+    end
+    if !isnothing(Velocity.Anisotropic)
+        write_sampling_to_vtk(output_directory, Velocity.Anisotropic)
+    end
+
+    return nothing
+end
+function write_sampling_to_vtk(output_directory::String, Isotropic::InverseIsotropicSlowness)
+    if !isnothing(Isotropic.Up)
+        xg, yg, zg = global_coordinate_arrays(Isotropic.Up.Mesh)
+        vtk_grid(output_directory*"/RSJS_InverseIsotropicSlowness_Up", xg, yg, zg) do vtk
+            vtk["RSJS"] = Isotropic.Up.RSJS
+        end
+    end
+    if !isnothing(Isotropic.Us)
+        xg, yg, zg = global_coordinate_arrays(Isotropic.Us.Mesh)
+        vtk_grid(output_directory*"/RSJS_InverseIsotropicSlowness_Us", xg, yg, zg) do vtk
+            vtk["RSJS"] = Isotropic.Us.RSJS
+        end
+    end
+
+    return nothing
+end
+function write_sampling_to_vtk(output_directory::String, Anisotropic::InverseAnisotropicVector)
+    if !isnothing(Anisotropic.Fractions)
+        write_sampling_to_vtk(output_directory, Anisotropic.Fractions)
+    end
+    if !isnothing(Anisotropic.Orientations)
+        write_sampling_to_vtk(output_directory, Anisotropic.Orientations)
+    end
+
+    return nothing
+end
+function write_sampling_to_vtk(output_directory::String, Orientations::InverseAzRadVector)
+    xg, yg, zg = global_coordinate_arrays(Orientations.A.Mesh)
+    vtk_grid(output_directory*"/RSJS_InverseAzRadVector_A", xg, yg, zg) do vtk
+        vtk["RSJS"] = Orientations.A.RSJS
+    end
+
+    xg, yg, zg = global_coordinate_arrays(Orientations.B.Mesh)
+    vtk_grid(output_directory*"/RSJS_InverseAzRadVector_B", xg, yg, zg) do vtk
+        vtk["RSJS"] = Orientations.B.RSJS
+    end
+
+    xg, yg, zg = global_coordinate_arrays(Orientations.C.Mesh)
+    vtk_grid(output_directory*"/RSJS_InverseAzRadVector_C", xg, yg, zg) do vtk
+        vtk["RSJS"] = Orientations.C.RSJS
+    end
+
+    return nothing
+end
+# Return global cartesian coordinate arrays
 function global_coordinate_arrays(Mesh)
     xg = zeros(size(Mesh))
     yg = zeros(size(Mesh))
@@ -79,7 +117,7 @@ function global_coordinate_arrays(Mesh)
 
     return xg, yg, zg
 end
-
+# Return anisotropic vector in the global cartesian coordinate system
 function global_anisotropic_vector(Model::PsiModel{<:HexagonalVectoralVelocity})
     sx = zeros(size(Model.Mesh))
     sy = zeros(size(Model.Mesh))
@@ -100,60 +138,154 @@ function global_anisotropic_vector(Model::PsiModel{<:HexagonalVectoralVelocity})
 end
 
 
-# NEED TO BE CHECKED
 
-# Write Model
-function write_psi_structure(out_file, Parameters, Mesh::RegularGrid)
+# Write PsiModel structures to ascii-files
+function write_psi_model(output_directory::String, Model::PsiModel;
+    tf_write_sources = true, tf_write_receivers = true, tf_write_parameters = true)
+
+    tf_write_sources ? write_psi_structure(output_directory*"/Sources.dat", Model.Sources) : nothing
+    tf_write_receivers ? write_psi_structure(output_directory*"/Receivers.dat", Model.Receivers) : nothing
+    tf_write_parameters ? write_psi_structure(output_directory*"/Parameters.dat", Model.Parameters, Model.Mesh) : nothing
+    return nothing
+end
+
+# Write SeismicSources or SeismicReceivers to ascii data file
+function write_psi_structure(out_file, S::Union{<:SeismicSources, <:SeismicReceivers})
     fid = open(out_file, "w")
-    print_header(fid, Mesh)
-    for (k, zk) in enumerate(Mesh.x[3])
-        for (j, yj) in enumerate(Mesh.x[2])
-            for (i, xi) in enumerate(Mesh.x[1])
-                print_parameters(fid, (xi, yj, zk), Parameters)
-            end
-        end
+    for id in eachindex(S.id)
+        k = S.id[id]
+        println(fid, id,", ",S.coordinates[k][1],", ",S.coordinates[k][2],", ",S.coordinates[k][3])
     end
     close(fid)
 
+    # Write Statics
+    if !isempty(S.statics)
+        static_file = splitdir(out_file)
+        static_file = static_file[1]*"/Statics_"*static_file[2]
+        sid = open(static_file, "w")
+        for (k, v) in S.statics
+            println(sid, k[1],", ",k[2],", ",k[3],", ", v)
+        end
+        close(sid)
+    end
+
     return nothing
 end
-function print_header(fid, Mesh)
+# Write model parameters to ascii data file
+function write_psi_structure(out_file, Parameters::ModelParameterization, Mesh::RegularGrid)
+    fid = open(out_file, "w")
+    # Write header information
     print_geometry(fid, Mesh.Geometry)
     print_mesh(fid, Mesh)
+    print_header(fid, Parameters)
+    n = 0
+    for (k, zk) in enumerate(Mesh.x[3])
+        for (j, yj) in enumerate(Mesh.x[2])
+            for (i, xi) in enumerate(Mesh.x[1])
+                n += 1
+                print_parameters(fid, n, (xi, yj, zk), Parameters)
+            end
+        end
+    end
+
+    close(fid)
     return nothing
 end
+
+# Print LocalGeographic geometry data
 function print_geometry(fid, Geometry::LocalGeographic)
     println(fid, Geometry.R₀,", ",Geometry.λ₀,", ",Geometry.ϕ₀,", ",Geometry.β)
     return nothing
 end
+# Print RegularGrid data
 function print_mesh(fid, Mesh::RegularGrid)
     n1, n2, n3 = size(Mesh)
+    xminmax, yminmax, zminmax = (extrema(Mesh.x[1]), extrema(Mesh.x[2]), extrema(Mesh.x[3]))
     println(fid, n1,", ",n2,", ",n3)
-    println(fid, Mesh.x[1][1],", ",Mesh.x[2][1],", ",Mesh.x[3][1],", ",Mesh.x[1][end],", ",Mesh.x[2][end],", ",Mesh.x[3][end])
+    println(fid, xminmax[1],", ",yminmax[1],", ",zminmax[1],", ",xminmax[2],", ",yminmax[2],", ",zminmax[2])
     return nothing
 end
-function print_parameters(fid, n, coords, Parameters::HexagonalVectoralVelocity)
-    α, β, ϵ, δ, γ = return_thomsen_parameters(Parameters, n)
-    println(fid, coords[1],", ",coords[2],", ",coords[3],", ",α,", ",β,", ",ϵ,", ",δ,", ",γ,", ",
-    Parameters.azimuth[n],", ",Parameters.elevation[n])
+# Print any necessary parameter headers
+function print_header(fid, Parameters)
     return nothing
 end
-# Write Observations
-function write_psi_structure(out_file, Observations::Vector{<:Observable})
-    fid = open(out_file, "w")
-    for obs in Observations
-        print_observation(fid, obs)
+# Print header information for HexagonalVectoralVelocity parameter data file
+function print_header(fid, Parameters::HexagonalVectoralVelocity)
+    if length(Parameters.ratio_ϵ) == 1
+        println(fid, Parameters.tf_exact,", ",Parameters.ratio_ϵ[1],", ",Parameters.ratio_η[1],", ",Parameters.ratio_γ[1])
+    else
+        println(fid, Parameters.tf_exact)
     end
-    close(fid)
+    return nothing
+end
+# Print IsotropicVelocity parameters
+function print_parameters(fid, n, coords, Parameters::IsotropicVelocity)
+    println(fid, coords[1],", ",coords[2],", ",coords[3],", ",Parameters.vp[n],", ",Parameters.vs[n])
+    return nothing
+end
+# Print HexagonalVectoralVelocity parameters
+function print_parameters(fid, n, coords, Parameters::HexagonalVectoralVelocity)
+    α, β, _ = return_thomsen_parameters(Parameters, n)
+    if length(Parameters.ratio_ϵ) == 1
+        println(fid, coords[1],", ",coords[2],", ",coords[3],", ",α,", ",β,", ",
+        Parameters.f[n],", ",Parameters.azimuth[n],", ",Parameters.elevation[n])
+    else
+        println(fid, coords[1],", ",coords[2],", ",coords[3],", ",α,", ",β,", ",
+        Parameters.f[n],", ",Parameters.azimuth[n],", ",Parameters.elevation[n],", ",
+        Parameters.ratio_ϵ[n],", ",Parameters.ratio_η[n],", ",Parameters.ratio_γ[n])
+    end
 
     return nothing
 end
-function write_psi_structure(out_file, Observations::Vector{<:Observable}, predictions)
-    fid = open(out_file, "w")
-    for (i, obs) in enumerate(Observations)
-        print_observation(fid, obs; observation = predictions[i])
+
+
+
+# Write Observations
+function write_observations(out_dir, Observations::Vector{<:Observable}; alt_data = nothing, prepend = "")
+    # Generate a dictionary of files to which to write the observations
+    OutFiles = Dict{NTuple{2, String}, IOStream}()
+    SubType = eltype(Observations)
+    while isa(SubType, Union)
+        # Identify concrete and Union types (not clear in which field they will be stored)
+        aType, SubType = isa(SubType.b, Union) ? (SubType.a, SubType.b) : (SubType.b, SubType.a)
+        # Extract Observable and Phase types
+        s = split(string(aType), "{")
+        a_phs = split(s[2], ",")
+        a_obs, a_phs = (s[1], a_phs[1])
+        # Store dictionary entry for observation file
+        OutFiles[(a_obs, a_phs)] = open(out_dir*"/"*prepend*"_"*a_obs*"_"*a_phs*".dat", "w")
     end
-    close(fid)
+    # Last entry
+    s = split(string(SubType), "{")
+    a_phs = split(s[2], ",")
+    a_obs, a_phs = (s[1], a_phs[1])
+    OutFiles[(a_obs, a_phs)] = open(out_dir*"/"*prepend*"_"*a_obs*"_"*a_phs*".dat", "w")
+
+    # Write observations to their respective files
+    for (i, B) in enumerate(Observations)
+        # Extract Observable and Phase types
+        s = split(string(B), "{")
+        a_phs = split(s[2], ",")
+        a_obs, a_phs = (s[1], a_phs[1])
+        # Print observation to file
+        isnothing(alt_data) ? print_observation(OutFiles[(a_obs, a_phs)], B) : print_observation(OutFiles[(a_obs, a_phs)], B; observation = alt_data[i])
+    end
+
+    # Close all the Observable files
+    for k in eachindex(OutFiles)
+        close(OutFiles[k])
+    end
+
+    return nothing
+end
+function print_observation(fid, B::SeismicObservable; observation = B.observation)
+    if typeof(B.Phase) <: ShearWave
+        println(fid, observation,", ",B.error,", ",B.Phase.period,", ",B.Phase.name,", ",
+        B.source_id,", ",B.receiver_id,", ","???",", ",B.Phase.paz)
+    else
+        println(fid, observation,", ",B.error,", ",B.Phase.period,", ",B.Phase.name,", ",
+        B.source_id,", ",B.receiver_id,", ","???")
+    end
 
     return nothing
 end

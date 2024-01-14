@@ -16,6 +16,16 @@ struct SolverLSQR{T} <: LinearisedSolver
     nonlinit::Int # Maximum number of non-linear iterations for iterative linearised approach
 end
 
+struct DataResiduals{T}
+    n::Int # Number of observations
+    f_stat::Vector{T} # F-statistic, ratios of variances between iterations (i.e., wssrₖ/wssrₖ₊₁)
+    f_critical::NTuple{2, T} # Critical valued at α-level significance
+    chi_squared::Vector{T} # Chi-squared values, i.e., (∑rᵢ²)/n
+    # subfit::Dict{NTuple{2, String}, T} # Dictionary of data fit metrics sub-divided by observation type
+end
+function DataResiduals(n; α = 0.95)
+    return DataResiduals(n, zeros(niter), (quantile(FDist(n - 1, n - 1), α), α), zeros(niter))
+end
 
 #################### INVERSION PARAMETERS ####################
 
@@ -65,70 +75,19 @@ struct SeismicSourceStatics{K, T, L} <: SeismicStatics
     ddm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and incremental static perturbations
     uncertainty::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and static uncertainty
     wdamp::Dict{L,T} # Dictionary of (Static Type, Static Phase) *keys* and their damping weights
-    tf_damp_cumulative::Bool
+    tf_damp_cumulative::Dict{L,Bool} # Dictionary of (Static Type, Static Phase) *keys* and their damping constraint
     jcol::Dict{K,Int} # Dictionary of (ID, Static Type, Static Phase) *keys* and Jacobian column index
     RSJS::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and row-sum of Jacobian squared value
 end
-function SeismicSourceStatics(id, static_types, static_phases, tf_damp_cumulative, wdamp, uncertainty)
-
-    # Initialise dictionaries and statics structure
-    Ki = eltype(id)
-    Ko = eltype(static_types)
-    Kp = eltype(static_phases)
-    T = eltype(wdamp)
-    S = SeismicSourceStatics(Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(),
-    Dict{Tuple{Ko, Kp}, T}(), tf_damp_cumulative, Dict{Tuple{Ki, Ko, Kp}, Int}(), Dict{Tuple{Ki, Ko, Kp}, T}())
-    # Fill the dictionaries
-    initialise_static_dictionaries!(S, id, static_types, static_phases, wdamp, uncertainty)
-
-    return S
-end
-
 # Seismic Receivers
 struct SeismicReceiverStatics{K, T, L} <: SeismicStatics
-    dm::Dict{K,T}
-    ddm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and static value
+    dm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and cumulative static perturbations
+    ddm::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and incremental static perturbations
     uncertainty::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and static uncertainty
     wdamp::Dict{L,T} # Dictionary of (Static Type, Static Phase) *keys* and their damping weight
-    tf_damp_cumulative::Bool
+    tf_damp_cumulative::Dict{L,Bool} # Dictionary of (Static Type, Static Phase) *keys* and their damping constraint
     jcol::Dict{K,Int} # Dictionary of (ID, Static Type, Static Phase) *keys* and Jacobian column index
     RSJS::Dict{K,T} # Dictionary of (ID, Static Type, Static Phase) *keys* and row-sum of Jacobian squared value
-end
-function SeismicReceiverStatics(id, static_types, static_phases, tf_damp_cumulative, wdamp, uncertainty)
-
-    # Initialise dictionaries and statics structure
-    Ki = eltype(id)
-    Ko = eltype(static_types)
-    Kp = eltype(static_phases)
-    T = eltype(wdamp)
-    S = SeismicReceiverStatics(Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(), Dict{Tuple{Ki, Ko, Kp}, T}(),
-    Dict{Tuple{Ko, Kp}, T}(), tf_damp_cumulative, Dict{Tuple{Ki, Ko, Kp}, Int}(), Dict{Tuple{Ki, Ko, Kp}, T}())
-    # Fill the dictionaries
-    initialise_static_dictionaries!(S, id, static_types, static_phases, wdamp, uncertainty)
-
-    return S
-end
-# Initialise static dictionaries for inversion
-function initialise_static_dictionaries!(S::SeismicStatics, Ki, Ko, Kp, wdamp, uncertainty)
-    # Fill dictionaries
-    n = 0
-    for k in eachindex(Kp) # Phase Type
-        for j in eachindex(Ko) # Observation Type
-            kj_damp = wdamp[k][j] # Damping for (phase, observable) pair
-            kj_uncertainty = uncertainty[k][j] # Uncertainty for (phase, observable) pair
-            S.wdamp[(Ko[j], Kp[k])] = kj_damp # Damping parameter--can be unique for each (Observable, SeismicPhase) pair
-            for i in eachindex(Ki) # Unique Identifyer (i.e. receiver or source ID)
-                n += 1
-                S.dm[(Ki[i], Ko[j], Kp[k])] = 0.0  # Assign initial cummulative static perturbation
-                S.ddm[(Ki[i], Ko[j], Kp[k])] = 0.0 # Assign initial incremental static perturbation
-                S.uncertainty[(Ki[i], Ko[j], Kp[k])] = kj_uncertainty # Assign static uncertainty
-                S.jcol[(Ki[i], Ko[j], Kp[k])] = n # Assign unique index number for Jacobian
-                S.RSJS[(Ki[i], Ko[j], Kp[k])] = 0.0 # Initial row-sum of Jacobian squared
-            end
-        end
-    end
-
-    return nothing
 end
 
 struct InverseSeismicVelocity{I, A} <: InversionParameter
@@ -169,8 +128,32 @@ end
 
 # MAIN INVERSION FUNCTION
 
+function psi_inverse(parameter_file::String)
+    # Load inputs
+    PsiParameters, Observations, ForwardModel, PerturbationModel, Solver = build_inputs(parameter_file);
+
+    # Create output directory
+    if !isempty(PsiParameters["Output"]["output_directory"])
+        # Create time-stamped directory?
+        if PsiParameters["Output"]["tf_time_stamp"]
+            date_now, time_now = split(string(now()), "T")
+            date_now, time_now = (split(date_now, "-"), split(time_now, ":"))
+            PsiParameters["Output"]["output_directory"] *= "/"*date_now[1][3:4]*prod(date_now[2:end])*"_"*prod(time_now[1:2])*time_now[3][1:2]
+        end
+        mkdir(PsiParameters["Output"]["output_directory"])
+        # Save copy of parameter file
+        path_filename = splitdir(parameter_file)
+        cp(parameter_file, PsiParameters["Output"]["output_directory"]*"/"*path_filename[2])
+    end
+
+    # Call inverse problem
+    psi_inverse!(Observations, ForwardModel, PerturbationModel, Solver; output_directory = PsiParameters["Output"]["output_directory"])
+
+    return PsiParameters, Observations, ForwardModel, PerturbationModel, Solver
+end
 # Solve linearized inverse problem of the form Ax = b using the LSQR solver
-function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel, PerturbationModel::SeismicPerturbationModel, Solver::SolverLSQR)
+function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel, PerturbationModel::SeismicPerturbationModel,
+    Solver::SolverLSQR; output_directory = "")
     # Assign Jacobian indices to parameters. Returns total number of parameters (i.e. Jacobian columns).
     npar = assign_jacobian_indices!(PerturbationModel)
     nobs = length(Observations)
@@ -185,6 +168,13 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
     _, b, Kernels = psi_forward(Observations, ForwardModel)
     # Initial sum of squared (relative) residuals
     wssr_k = sum(b -> b^2, b; init = 0.0)
+
+    # Create file to store data fit at each iteration
+    if !isempty(output_directory)
+        fid_fit = open(output_directory*"/chi_squared.txt", "w")
+        println(fid_fit, "F-crit (n = ", nobs,", alpha = 0.95): ",fcrit)
+        println(fid_fit, "0, ",wssr_k/nobs)
+    end
 
     # Inner inversion iterations (i.e. no kernel sensitivity update)
     kiter = 0
@@ -225,6 +215,7 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         # Re-evalute weighted sum of the squared resdiuals
         _, b = evaluate_kernel(Kernels)
         wssr_l = sum(b -> b^2, b)
+        !isempty(output_directory) ? println(fid_fit, kiter + 1,", ",wssr_l/nobs) : nothing
         # Compute new fstat
         fstat = wssr_k/wssr_l
         # Check for divergence. For non-linear inversions the solution can bounce around once it reaches a minimum.
@@ -235,8 +226,8 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
             _, b = evaluate_kernel(Kernels)
             wssr_l = sum(b -> b^2, b)
             fstat = wssr_k/wssr_l
-            # This line search tends to not converge suggesting that the regularisation is controlling the gradient when
-            # the LSQR solution diverges.
+            # This line search tends to not converge suggesting that the regularisation is controlling the gradient when the
+            # LSQR solution diverges. In this case, the regularization weights need to be reduced for the solution to improve.
             # fstat, wssr_l, b = line_search!(x, PerturbationModel, Kernels, wssr_k, wssr_l; maxiter = 10, step_size = 0.5)
         end
 
@@ -253,8 +244,31 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         # Update iteration counter
         kiter += 1
     end
-    # Update Model
-    update_model!(ForwardModel, PerturbationModel)
+
+    # Write results
+    if !isempty(output_directory)
+        # Close chi-squared file
+        close(fid_fit)
+        # Write absolute residuals from final model
+        _, res  = evaluate_kernel(Kernels)
+        for i in eachindex(res)
+            res[i] *= Observations[i].error
+        end
+        write_observations(output_directory, Observations; alt_data = res, prepend = "RES")
+        # Write parameter sampling VTK
+        write_sampling_to_vtk(output_directory, PerturbationModel)
+        # Write the model VTK file (with starting model)
+        vp_ref, vs_ref = return_isotropic_velocities(ForwardModel.Parameters)
+        update_model!(ForwardModel, PerturbationModel)
+        write_model_to_vtk(output_directory*"/FinalModel", ForwardModel; vp_ref = vp_ref, vs_ref = vs_ref)
+        # Write PsiModel files
+        tf_write_sources = !isnothing(PerturbationModel.Hypocenter) || !isnothing(PerturbationModel.SourceStatics)
+        tf_write_receivers = !isnothing(PerturbationModel.SourceStatics)
+        write_psi_model(output_directory, ForwardModel; tf_write_sources = tf_write_sources,
+        tf_write_receivers = tf_write_receivers, tf_write_parameters = true)
+    else
+        update_model!(ForwardModel, PerturbationModel)
+    end
 
     return nothing
 end
@@ -1134,7 +1148,7 @@ function build_constraints!(Aᵢ, Aⱼ, Aᵥ, b, PerturbationModel::SeismicStati
             push!(Aⱼ, j)
             push!(Aᵥ, w)
             # Constraint value
-            if PerturbationModel.tf_damp_cumulative
+            if PerturbationModel.tf_damp_cumulative[ki]
                 dm = PerturbationModel.wdamp[ki]*PerturbationModel.dm[kj]/PerturbationModel.uncertainty[kj]
                 push!(b, -dm)
             else

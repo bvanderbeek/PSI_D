@@ -52,7 +52,7 @@ function fill_observation_vector(f, Obs::Type{<:SplittingParameters}, phase, for
     return B
 end
 # EVALUATE KERNEL: Splitting Parameters
-function evaluate_kernel(Kernel::ObservableKernel{<:SplittingParameters, <:HexagonalVectoralVelocity})
+function evaluate_kernel(Kernel::ObservableKernel{<:SplittingParameters})
     # Compute split waveform
     S, Ts, Δt_weak, ζ_weak, _ = kernel_split_wavelet(Kernel)
     s1, s2 = (@views S[1,:], @views S[2,:])
@@ -78,7 +78,7 @@ function evaluate_kernel(Kernel::ObservableKernel{<:SplittingParameters, <:Hexag
 
     return (split_time, fast_azimuth), (res_time, res_azim)
 end
-function kernel_split_wavelet(Kernel::ObservableKernel{<:SplittingParameters, <:HexagonalVectoralVelocity};
+function kernel_split_wavelet(Kernel::ObservableKernel{<:SplittingParameters};
     order = 1, sampling_period = 0.01*Kernel.Observation.Phase.period, relative_length = 2.0)
 
     # Construct initial wavelet (linearly polarized on channel 1)
@@ -88,16 +88,9 @@ function kernel_split_wavelet(Kernel::ObservableKernel{<:SplittingParameters, <:
     γ11, γ12, dominant_frequency = (1.0 + 0.0im, 0.0 + 0.0im, 1.0/Kernel.Observation.Phase.period)
     # Propagate wavelet through anisotropic intervals
     for (index, w) in enumerate(Kernel.weights)
-        # Get Thomsen parameters
-        α, β, ϵ, δ, γ = return_thomsen_parameters(Kernel.Parameters, index)
-        # Compute qS phase velocities
-        if Kernel.Parameters.tf_exact
-            vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
-            Kernel.Observation.Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ, δ, γ)
-        else
-            vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
-            Kernel.Observation.Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
-        end
+        # qS-phase velocities
+        vqs1, vqs2, _, ζ = qs_phase_velocities(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
+        Kernel.Observation.Phase.paz, Kernel.Parameters, index)
         # Delay of qS'-wave (symmetry axis polarization) with respect to qS''-wave
         Δt = w.dr*((1.0/vqs1) - (1.0/vqs2))
         # Split the waveform
@@ -335,7 +328,7 @@ function transverse_energy_minimization(q, t, sampling_period, split_time, split
     i1, i2 = (ref_indices[1], delay_indices[1])
     E = 0.0 # Initialize transverse energy
     for i in 1:nsamp
-        qi1, ti1 = (real(q[i1]), real(t[i1])) # Allows for complex time-domain signal (consequency of ifft)
+        qi1, ti1 = (real(q[i1]), real(t[i1])) # Allows for complex time-domain signal (consequence of ifft)
         qi2, ti2 = (real(q[i2]), real(t[i2]))
         # Rotate the split_azimuth to channel 1
         u1i = cosζ*qi1 - sinζ*ti1
@@ -360,7 +353,7 @@ function trace_covariance_minimization(s1, s2, sampling_period, split_time, spli
     i1, i2 = (ref_indices[1], delay_indices[1])
     c11, c22, c12 = (0.0, 0.0, 0.0) # Initialize trace covariance matrix components
     for i in 1:nsamp
-        s1i1, s2i1 = (real(s1[i1]), real(s2[i1])) # Allows for complex time-domain signal (consequency of ifft)
+        s1i1, s2i1 = (real(s1[i1]), real(s2[i1])) # Allows for complex time-domain signal (consequence of ifft)
         s1i2, s2i2 = (real(s1[i2]), real(s2[i2]))
         # Rotate the split_azimuth to channel 1
         u1i = cosζ*s1i1 - sinζ*s2i1

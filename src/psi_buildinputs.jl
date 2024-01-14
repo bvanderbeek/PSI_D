@@ -3,13 +3,8 @@ function build_inputs(param_file)
     # Parse input toml-file
     D = TOML.parsefile(param_file)
 
-    # Observations
-    if isempty(D["Observations"]["theObservations"])
-        # Build the observation structure 
-        Obs = build_observations(D["Observations"])
-    else
-        error("Loading an existing observation structure is not yet implemented.")
-    end
+    # Build the observation structure 
+    Obs = build_observations(D["Observations"])
 
     # Model
     if isempty(D["Model"]["theModel"])
@@ -42,58 +37,56 @@ function build_inputs(param_file)
     return D, Obs, Model, InvParam, Solv
 end
 
-# Returns vector of observations
-function build_observations(D::Dict)
-    # Parse inputs
-    f = D["data_file"] # Data file with observations
-    obs = eval(Symbol(D["type"])) # Type of observations in data file
-    phase = eval(Symbol(D["phase"])) # Phase type in data file
-    forward = eval(Symbol(D["forward"])) # Forward modelling method for these data
-
-    return fill_observation_vector(f, obs, phase, forward; dlm = ",", data_type = Float64)
-end
-
-# Loads SeismicObservable observations of a specific kind into an array
-function fill_observation_vector(f, Obs::Type{<:SeismicObservable}, phase, forward; dlm = ",", data_type = Float64)
-    # Determing source/receiver ID format
-    sid_type, convert_sid = get_id_type(f; index = 5, dlm = dlm)
-    rid_type, convert_rid = get_id_type(f; index = 6, dlm = dlm)
-
-    # Read polarisation angle from file? Polarisation is assumed to be stored in 8th column.
-    line = readline(f)
-    line = split(line, dlm)
-    tf_read_paz = (length(line) > 7)
-
-    # Allocate storage vector
-    n = countlines(f)
-    B = Vector{Obs{phase, forward, sid_type, rid_type, data_type}}(undef, n)
-    # Read in observations
-    k = 0
-    for line in readlines(f)
-        # Update counter 
-        k += 1
-        # Parse data row
-        line = split(line, dlm)
-        b = parse(data_type, line[1])
-        σ = parse(data_type, line[2])
-        T = parse(data_type, line[3])
-        p = string(strip(line[4]))
-        sid = convert_sid(strip(line[5]))
-        rid = convert_rid(strip(line[6]))
-        chn = strip(line[7])
-        # Build observable
-        if tf_read_paz
-            paz = parse(data_type, line[8])
-            B[k] = Obs(phase(p, T, paz), forward(), sid, rid, b, σ)
-        else
-            B[k] = Obs(phase(p, T), forward(), sid, rid, b, σ)
+# Type unstable but loading data is not currently a performance concern
+function build_observations(D::Dict; FwdType = ForwardTauP,  dlm = ",", ValueType = Float64)
+    SIDType, RIDType = (Int, String) # Assumed types for source and receiver IDs!!!
+    # Allocate observation vector
+    ObsUnion = Union{}
+    nobs = 0
+    for bkey in eachindex(D) # Loop over SeismicObservable types
+        ObsType = eval(Symbol(bkey))
+        ObsValType = ObsType <: SplittingParameters ? NTuple{2, ValueType} : ValueType
+        for pkey in eachindex(D[bkey]) # Loop over SeismicPhase types
+            PhsType = eval(Symbol(pkey))
+            ObsUnion = Union{ObsType{PhsType, FwdType, SIDType, RIDType, ObsValType}, ObsUnion}
+            nobs += countlines(D[bkey][pkey]["filename"])
+        end
+    end
+    bvec = Vector{ObsUnion}(undef, nobs)
+    # Fill observation vector
+    iobs = 0
+    for bkey in eachindex(D) # Loop over SeismicObservable types
+        ObsType = eval(Symbol(bkey))
+        for pkey in eachindex(D[bkey]) # Loop over SeismicPhase types
+            PhsType = eval(Symbol(pkey))
+            for line in readlines(D[bkey][pkey]["filename"]) # Loop over observations
+                iobs += 1
+                line = split(line, dlm)
+                aPhase, sid, rid, b, σ = parse_data_row(ObsType, PhsType, line; ValueType = ValueType)
+                bvec[iobs] = ObsType(aPhase, FwdType(), sid, rid, b, σ)
+            end
         end
     end
 
-    return B
+    return bvec
+end
+function parse_data_row(::Type{<:SeismicObservable}, PhsType, line; ValueType = Float64)
+    b, σ = ( parse(ValueType, line[1]), parse(ValueType, line[2]) )
+    T, phs, sid, rid = (parse(ValueType, line[3]), string(strip(line[4])), parse(Int, line[5]), string(strip(line[6])))
+    # Channel name assumed to be stored in column 7
+    aPhase = length(line) > 7 ? PhsType(phs, T, parse(ValueType, line[8])) : PhsType(phs, T)
+    return aPhase, sid, rid, b, σ
+end
+function parse_data_row(::Type{SplittingParameters}, PhsType, line; ValueType = Float64)
+    b = ( parse(ValueType, line[1]), parse(ValueType, line[2]) )
+    b = ( parse(ValueType, line[3]), parse(ValueType, line[4]) )
+    T, phs, sid, rid = ( parse(ValueType, line[5]), string(strip(line[6])), parse(Int, line[7]), string(strip(line[8])) )
+    # Channel name assumed to be stored in column 9
+    aPhase = length(line) > 9 ? PhsType(phs, T, parse(ValueType, line[10])) : PhsType(phs, T)
+    return aPhase, sid, rid, b, σ
 end
 
-# Determines the formatting for source and receiver IDs
+# Determines the formatting for source and receiver IDs...DEPRECATED! FIXED TYPES FOR SOURCE AND RECEIVER ID
 function get_id_type(f; index = 1, dlm = ",")
     # Determine if source IDs are integers or strings
     line = readline(f)
@@ -317,6 +310,46 @@ function read_model_parameters(io, parameterisation::Type{IsotropicVelocity}, Me
     return Parameters
 end
 
+function read_model_parameters(io, parameterisation::Type{HexagonalVectoralVelocity}, Mesh; dlm = ",", T = Float64)
+    # Allocate model structure
+    nxyz = size(Mesh)
+    line = readline(io)
+    line = split(line, dlm)
+    if length(line) == 1
+        tf_read_ratios = true
+        tf_exact = parse(Bool, line[1])
+        Parameters = HexagonalVectoralVelocity(zeros(nxyz), zeros(nxyz), zeros(nxyz), zeros(nxyz), zeros(nxyz),
+        zeros(nxyz), zeros(nxyz), zeros(nxyz), tf_exact)
+    elseif length(line) == 4
+        tf_read_ratios = false
+        tf_exact, ratio_ϵ, ratio_η, ratio_γ = (parse(Bool, line[1]), parse(T, line[2]), parse(T, line[3]), parse(T, line[4]))
+        Parameters = HexagonalVectoralVelocity(zeros(nxyz), zeros(nxyz), zeros(nxyz), zeros(nxyz), zeros(nxyz),
+        ratio_ϵ, ratio_η, ratio_γ, tf_exact)
+    else
+        error("Unrecognized header format!")
+    end
+    # Read and populate model
+    k = 0
+    for line in readlines(io)
+        # Update counter
+        k += 1
+        # Split the line
+        line = split(line, dlm)
+        # Store hexagonal velocity parameters
+        Parameters.α[k] = parse(T, line[4])
+        Parameters.β[k] = parse(T, line[5])
+        Parameters.f[k] = parse(T, line[6])
+        Parameters.azimuth[k] = parse(T, line[7])
+        Parameters.elevation[k] = parse(T, line[8])
+        if tf_read_ratios
+            Parameters.ratio_ϵ[k], Parameters.ratio_η[k], Parameters.ratio_γ[k] = (parse(T, line[9]), parse(T, line[10]), parse(T, line[11]))
+        end
+    end
+    close(io)
+
+    return Parameters
+end
+
 # INVERSION PARAMETERS
 
 # Builds a SeismicPerturbationModel
@@ -442,27 +475,48 @@ function build_anisotropic_parameters(::Type{InverseAzRadVector}, Mesh, Model::P
     return InverseAzRadVector(A, B, C)
 end
 
-# Build SeismicReceiverStatics
-function build_source_statics(D::Dict, id)
-    # Extract parameters
-    static_types = Symbol.(D["types"])
-    static_phases = Symbol.(D["phases"])
-    tf_jump = D["tf_jump"]
-    damping = D["damping"]
-    unc = D["uncertainty"]
+# Build SeismicSourceStatics
+function build_source_statics(D::Dict, id; value_type = Float64)
+    # Initialise dictionaries in statics structure
+    Ki, Ko, Kp = (eltype(id), Symbol, Symbol) # ID-Observable-Phase Tuple for keys
+    Statics = SeismicSourceStatics(Dict{Tuple{Ki, Ko, Kp}, value_type}(), Dict{Tuple{Ki, Ko, Kp}, value_type}(), Dict{Tuple{Ki, Ko, Kp}, value_type}(),
+    Dict{Tuple{Ko, Kp}, value_type}(), Dict{Tuple{Ko, Kp}, Bool}(), Dict{Tuple{Ki, Ko, Kp}, Int}(), Dict{Tuple{Ki, Ko, Kp}, value_type}())
+    # Fill the static dictionaries
+    initialize_static_parameters!(Statics, D, id)
 
-    return SeismicSourceStatics(id, static_types, static_phases, tf_jump, damping, unc)
+    return Statics
 end
 # Build SeismicReceiverStatics
-function build_receiver_statics(D::Dict, id)
-    # Extract parameters
-    static_types = Symbol.(D["types"])
-    static_phases = Symbol.(D["phases"])
-    tf_jump = D["tf_jump"]
-    damping = D["damping"]
-    unc = D["uncertainty"]
+function build_receiver_statics(D::Dict, id; value_type = Float64)
+    # Initialise dictionaries in statics structure
+    Ki, Ko, Kp = (eltype(id), Symbol, Symbol) # ID-Observable-Phase Tuple for keys
+    Statics = SeismicReceiverStatics(Dict{Tuple{Ki, Ko, Kp}, value_type}(), Dict{Tuple{Ki, Ko, Kp}, value_type}(), Dict{Tuple{Ki, Ko, Kp}, value_type}(),
+    Dict{Tuple{Ko, Kp}, value_type}(), Dict{Tuple{Ko, Kp}, Bool}(), Dict{Tuple{Ki, Ko, Kp}, Int}(), Dict{Tuple{Ki, Ko, Kp}, value_type}())
+    # Fill the static dictionaries
+    initialize_static_parameters!(Statics, D, id)
+    
+    return Statics
+end
+function initialize_static_parameters!(S::SeismicStatics, D::Dict, id)
+    n = 0
+    for obs in eachindex(D) # Observable
+        key_obs = Symbol(obs)
+        for (p, phs) in enumerate(D[obs]["phases"]) # Phase
+            key_phs = Symbol(phs)
+            S.tf_damp_cumulative[(key_obs, key_phs)] = D[obs]["tf_jump"][p] # Damping parameter--can be unique for each (Observable, SeismicPhase) pair
+            S.wdamp[(key_obs, key_phs)] = D[obs]["damping"][p]
+            for key_id in id # Identifier
+                n += 1
+                S.dm[(key_id, key_obs, key_phs)] = 0.0  # Assign initial cummulative static perturbation
+                S.ddm[(key_id, key_obs, key_phs)] = 0.0 # Assign initial incremental static perturbation
+                S.uncertainty[(key_id, key_obs, key_phs)] = D[obs]["uncertainty"][p] # Assign static uncertainty
+                S.jcol[(key_id, key_obs, key_phs)] = n # Assign unique index number for Jacobian
+                S.RSJS[(key_id, key_obs, key_phs)] = 0.0 # Initial row-sum of Jacobian squared
+            end
+        end
+    end
 
-    return SeismicReceiverStatics(id, static_types, static_phases, tf_jump, damping, unc)
+    return nothing
 end
 
 

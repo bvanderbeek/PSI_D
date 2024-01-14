@@ -71,7 +71,7 @@ function SeismicReceivers(id, coordinates; ObservableKey = Symbol, PhaseKey = Sy
 
     return SeismicReceivers(Dict(zip(id, 1:n)), coordinates, Dict{Tuple{idKey, ObservableKey, PhaseKey}, StaticType}())
 end
-function SeismicReceivers(id, ϕ, λ, r, static_observable, static_phases; static_type = Float64)
+function SeismicReceivers(id, coordinates, static_observable, static_phases; static_type = Float64)
     # Initialise SeismicReceivers with empty dictionaries
     R = SeismicReceivers(id, coordinates; ObservableKey = eltype(static_observable), PhaseKey = eltype(static_phases), StaticType = static_type)
     # Fill static dictionary
@@ -103,6 +103,9 @@ struct IsotropicVelocity{T} <: SeismicVelocity
 end
 function IsotropicVelocity(T::DataType, dim)
     return IsotropicVelocity(zeros(dim), zeros(dim))
+end
+function return_isotropic_velocities(Parameters::IsotropicVelocity)
+    return deepcopy(Parameters.vp), deepcopy(Parameters.vs)
 end
 function return_velocity_fields(Parameters::IsotropicVelocity)
     return getfield(Parameters, :vp), getfield(Parameters, :vs)
@@ -170,6 +173,14 @@ function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity{T, R}
     vip = α*sqrt( 1.0 + (16/15)*ϵ + (4/15)*δ )
     vis = β*sqrt( 1.0 + (2/3)*γ + (2/15)*((α^2)/(β^2))*(ϵ - δ) )
     return vip, vis
+end
+function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity{T, R}) where {T, R}
+    vp, vs = (similar(Parameters.f), similar(Parameters.f))
+    for i in eachindex(Parameters.f)
+        vp[i], vs[i] = return_isotropic_velocities(Parameters, i)
+    end
+
+    return vp, vs
 end
 function return_reference_velocities(Parameters::HexagonalVectoralVelocity{T,R}, vip, vis, index) where {T, R}
     _, _, ϵ, δ, γ = return_thomsen_parameters(Parameters, index)
@@ -284,7 +295,7 @@ end
 # If no polarisation provided, default to radially polarised
 function ShearWave(name, period)
     return ShearWave(name, period, 0.0)
-end
+end 
 
 # TravelTime Observation
 struct TravelTime{P, F, S, R, T} <: SeismicObservable
@@ -331,12 +342,33 @@ end
 
 
 
+# PSI FORWARD: Parameter File
+function psi_forward(parameter_file::String)
+    # Load inputs
+    PsiParameters, Observations, ForwardModel, _ = build_inputs(parameter_file)
+    # Call forward problem
+    predictions, relative_residuals, Kernels = psi_forward(Observations, ForwardModel)
+    # Save results
+    if !isempty(PsiParameters["Output"]["output_directory"])
+        # Create time-stamped directory?
+        if PsiParameters["Output"]["tf_time_stamp"]
+            date_now, time_now = split(string(now()), "T")
+            date_now, time_now = (split(date_now, "-"), split(time_now, ":"))
+            PsiParameters["Output"]["output_directory"] *= "/"*date_now[1][3:4]*prod(date_now[2:end])*"_"*prod(time_now[1:2])*time_now[3][1:2]
+        end
+        mkdir(PsiParameters["Output"]["output_directory"])
+        # Save predictions and copy of parameter file
+        write_observations(PsiParameters["Output"]["output_directory"], Observations; alt_data = predictions, prepend = "SYN")
+        path_filename = splitdir(parameter_file)
+        cp(parameter_file, PsiParameters["Output"]["output_directory"]*"/"*path_filename[2])
+    end
 
-
+    return PsiParameters, Observations, ForwardModel, relative_residuals, Kernels
+end
 # PSI FORWARD: Abstract Observable + PSI Model
 function psi_forward(Observation::Observable, Model::PsiModel)
     # Build the kernel structure for the particular observable
-    Kernel = return_kernel(Observation.Forward, Observation, Model)
+    Kernel = return_kernel(Observation, Model)
     # Evaluate the kernel
     prediction, relative_residual = evaluate_kernel(Kernel)
 
@@ -349,17 +381,15 @@ function psi_forward(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Ob
     # Allocate storage arrays
     n = length(Observations)
     val_type = eltype(Model.Mesh.x[1]) # Type assumed for model parameter and coordinate values
-    obs_type = typeof(Observations[1].observation) # Type that stores an observation
+    obs_type = typeof(Observations[1].observation) # Type that stores an observation.......COULD FAIL FOR MULTIOBSERVABLES
     predictions = Vector{obs_type}(undef, n)
     relative_residuals = Vector{obs_type}(undef, n)
     # Vector of kernels
     param_type = return_kernel_parameter_type(P, val_type)
     coord_type = Vector{NTuple{ndims(Model.Mesh), val_type}}
     weight_type = Vector{NamedTuple{(:dr, :azimuth, :elevation), NTuple{3, val_type}}} # Assuming fixed names for weights!
-    Kernels = Vector{ObservableKernel{B, param_type, coord_type, weight_type, Vector{obs_type}}}(undef, n)
-    # Lazy way is to just compute one kernel to get the type, e.g.,
-    #   a_prediction, a_relative_residual, a_Kernel = psi_forward(Observations[1], Model)
-    #   Kernels = Vector{typeof(a_Kernel)}(undef, n)
+    KernelTypes = return_kernel_types(B, param_type, coord_type, weight_type, obs_type)
+    Kernels = Vector{KernelTypes}(undef, n); # Vector{ObservableKernel{B, param_type, coord_type, weight_type, Vector{obs_type}}}(undef, n)
 
     # Compute kernels
     for i in eachindex(Observations)
@@ -377,10 +407,25 @@ end
 function return_kernel_parameter_type(::Type{HexagonalVectoralVelocity{T, R}}, V) where {T <: Array, R <: Array}
     return HexagonalVectoralVelocity{Vector{V}, Vector{V}}
 end
+function return_kernel_types(ObsTypes::Union, param_type, coord_type, weight_type, value_type)
+    KernelTypes = Union{}
+    SubType = ObsTypes
+    while isa(SubType, Union)
+        # Identify concrete and Union types (not clear in which field they will be stored)
+        aType, SubType = isa(SubType.b, Union) ? (SubType.a, SubType.b) : (SubType.b, SubType.a)
+        KernelTypes = Union{ObservableKernel{aType, param_type, coord_type, weight_type, Vector{value_type}}, KernelTypes}
+    end
+    KernelTypes = Union{ObservableKernel{SubType, param_type, coord_type, weight_type, Vector{value_type}}, KernelTypes}
+
+    return KernelTypes
+end
+function return_kernel_types(ObsType::DataType, param_type, coord_type, weight_type, value_type)
+    return ObservableKernel{ObsType, param_type, coord_type, weight_type, Vector{value_type}}
+end
 
 
 # RETURN KERNEL: TauP + Seismic Observable
-function return_kernel(::ForwardTauP, Observation::T, Model::PsiModel) where {T <: SeismicObservable}
+function return_kernel(Observation::T, Model::PsiModel) where {T <: SeismicObservable}
     # Compute the ray path
     ray_lon, ray_lat, ray_elv, ray_time = call_taup_path(Observation, Model)
     # Convert geographic coordinates to global coordinate Tuple
@@ -700,6 +745,57 @@ function kernel_splitting_intensity(Phase::ShearWave, Kernel::ObservableKernel{T
     return si
 end
 
+function qp_phase_velocity(propagation_azimuth, propagation_elevation, Parameters::HexagonalVectoralVelocity, index)
+    # Get Thomsen parameters
+    α, β, ϵ, δ, _ = return_thomsen_parameters(Parameters, index)
+    # Compute trigonometric terms
+    cosθ = symmetry_axis_cosine(Parameters.azimuth[index], Parameters.elevation[index], propagation_azimuth, propagation_elevation)
+    cosθ_2 = cosθ^2
+    sinθ_2 = 1.0 - cosθ_2
+    # Compute qP phase velocity
+    if Parameters.tf_exact
+        # Compute D-parameter (Thomsen, 1986; Eq. 10d)
+        g = 1.0 - ((β/α)^2)
+        f = g^(-2)
+        D = 0.5*g*( sqrt( 1.0 + 4.0*δ*f*sinθ_2*cosθ_2 + 4.0*ϵ*(g + ϵ)*f*(sinθ_2^2) ) - 1.0 )
+        # Exact qP-phase velocity (Thomsen, 1986; Eq. 10a)
+        vqp = α*sqrt( 1.0 + ϵ*sinθ_2 + D )
+    else
+        # Approximate qP-phase velocity
+        vqp = α*sqrt( 1.0 + 2.0*ϵ*(sinθ_2^2) + 2.0*δ*sinθ_2*cosθ_2 )
+        # vqp = α*( 1.0 + ϵ*(sinθ_2^2) + δ*sinθ_2*cosθ_2 ) # Weak Approximation (Thomsen, 1986; Eq. 16a)
+    end
+
+    return vqp, cosθ
+end
+function qs_phase_velocities(propagation_azimuth, propagation_elevation, qt_polarization, Parameters::HexagonalVectoralVelocity, index)
+    # Get Thomsen parameters
+    α, β, ϵ, δ, γ = return_thomsen_parameters(Parameters, index)
+    # Compute angle between propagation direction and symmetry axis
+    cosθ, ζ = symmetry_axis_cosine(symmetry_azimuth, symmetry_elevation, propagation_azimuth, propagation_elevation, qt_polarization)
+    cosθ_2 = cosθ^2
+    sinθ_2 = 1.0 - cosθ_2
+    # Compute qS phase velocities
+    if Parameters.tf_exact
+        # Compute D-parameter (Thomsen, 1986; Eq. 10d)
+        g = 1.0 - ((β/α)^2)
+        f = g^(-2)
+        D = 0.5*g*( sqrt( 1.0 + 4.0*δ*f*sinθ_2*cosθ_2 + 4.0*ϵ*(g + ϵ)*f*(sinθ_2^2) ) - 1.0 )
+        # Exact qS-phase velocities (Thomsen, 1986; Eq. 10b,c)
+        vqs1 = β*sqrt( 1.0 + ((α/β)^2)*(ϵ*sinθ_2 - D) )
+        vqs2 = β*sqrt( 1.0 + 2.0*γ*sinθ_2 )
+    else
+        # Approximate qS-phase velocities
+        vqs1 = β*sqrt( 1.0 + 2.0*((α/β)^2)*(ϵ - δ)*sinθ_2*cosθ_2 )
+        vqs2 = β*sqrt( 1.0 + 2.0*γ*sinθ_2 )
+        # vqs1 = β*( 1.0 + ((α/β)^2)*(ϵ - δ)*sinθ_2*cosθ_2 ) # Weak approximation (Thomsen, 1986; Eq. 16b)
+        # vqs2 = β*( 1.0 + γ*sinθ_2 ) # Weak approximation (Thomsen, 1986; Eq. 16c)
+    end
+
+    return vqs1, vqs2, cosθ, ζ
+end
+
+# DEPRECATE THESE FUNCTIONS USING ABOVE
 function qp_phase_velocity_thomsen(propagation_azimuth, propagation_elevation, symmetry_azimuth, symmetry_elevation, α, ϵ, δ)
 
     # Compute trigonometric terms
