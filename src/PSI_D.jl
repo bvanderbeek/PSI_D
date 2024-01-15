@@ -12,14 +12,14 @@ using TOML
 using WriteVTK
 using Dates
 
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_coordinate_systems.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_forward.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_forward_elastic_tensor.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_forward_splitting_parameters.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_inverse.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_output.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/psi_buildinputs.jl")
-include("/Users/bvanderbeek/research/software/GitRepos/PSI_D/src/utilities.jl")
+include("psi_coordinate_systems.jl")
+include("psi_forward.jl")
+include("psi_forward_elastic_tensor.jl")
+include("psi_forward_splitting_parameters.jl")
+include("psi_inverse.jl")
+include("psi_output.jl")
+include("psi_buildinputs.jl")
+include("utilities.jl")
 
 export build_inputs, psi_forward, psi_inverse, psi_inverse!
 
