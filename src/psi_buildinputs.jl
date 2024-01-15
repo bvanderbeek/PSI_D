@@ -314,7 +314,7 @@ function read_model_parameters(io, parameterisation::Type{HexagonalVectoralVeloc
     # Allocate model structure
     nxyz = size(Mesh)
     line = readline(io)
-    line = split(line, dlm)
+    line = strip.(split(line, dlm))
     if length(line) == 1
         tf_read_ratios = true
         tf_exact = parse(Bool, line[1])

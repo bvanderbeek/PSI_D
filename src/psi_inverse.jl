@@ -1411,7 +1411,7 @@ end
 function revert_parameters!(::IsotropicVelocity, ::InverseSeismicVelocity)
     return nothing
 end
-function convert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSeismicVelocity{I, A}) where {I <: InverseIsotropicSlowness, A}
+function convert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSeismicVelocity)
     # Convert symmetry axis (i.e. Thomsen's reference velocities) to isotropic velocities
     for i in eachindex(Parameters.f)
         vip, vis = return_isotropic_velocities(Parameters, i)
@@ -1425,7 +1425,7 @@ function convert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSei
 
     return nothing
 end
-function revert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSeismicVelocity{I, A}) where {I <: InverseIsotropicSlowness, A}
+function revert_parameters!(Parameters::HexagonalVectoralVelocity, ::InverseSeismicVelocity)
     # Convert symmetry axis (i.e. Thomsen's reference velocities) to isotropic velocities
     for i in eachindex(Parameters.f)
         # Assumed that the α and β fields are currently storing the isotropic P- and S-velocity
