@@ -90,7 +90,7 @@ end
 function get_id_type(f; index = 1, dlm = ",")
     # Determine if source IDs are integers or strings
     line = readline(f)
-    line = split(line, dlm)
+    line = split(line, dlm, keepempty = false)
     if isnothing(tryparse(Int, strip(line[index])))
         id_type = String
         convert_id = (x) -> string(x)
@@ -177,7 +177,7 @@ function build_sources(f; dlm = ",", data_type = Float64)
         # Update counter
         k += 1
         # Split the line
-        line = split(line, dlm)
+        line = split(line, dlm, keepempty = false)
         id[k] = convert_id(strip(line[1]))
         lon = parse(data_type, line[2])
         lat = parse(data_type, line[3])
@@ -204,7 +204,7 @@ function build_receivers(f; dlm = ",", data_type = Float64)
         # Update counter
         k += 1
         # Split the line
-        line = split(line, dlm)
+        line = split(line, dlm, keepempty = false)
         id[k] = convert_id(strip(line[1]))
         lon = parse(data_type, line[2])
         lat = parse(data_type, line[3])
