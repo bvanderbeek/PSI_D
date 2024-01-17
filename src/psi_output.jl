@@ -3,14 +3,12 @@
 function write_model_to_vtk(output_file::String, Model::PsiModel{<:IsotropicVelocity}; vp_ref = nothing, vs_ref = nothing)
     # Define global coordinates
     xg, yg, zg = global_coordinate_arrays(Model.Mesh)
-    # Define the global anisotropic vector
-    sx, sy, sz = global_anisotropic_vector(Model)
     # Write VTK file
     vtk_grid(output_file, xg, yg, zg) do vtk
         !isnothing(vp_ref) ? vtk["Vp_ref"] = vp_ref : nothing
         !isnothing(vs_ref) ? vtk["Vs_ref"] = vs_ref : nothing
-        vtk["Vp"] = Model.vp
-        vtk["Vs"] = Model.vs
+        vtk["Vp"] = Model.Parameters.vp
+        vtk["Vs"] = Model.Parameters.vs
     end
 
     return nothing
