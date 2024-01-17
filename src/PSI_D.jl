@@ -22,5 +22,6 @@ include("psi_buildinputs.jl")
 include("utilities.jl")
 
 export build_inputs, psi_forward, psi_inverse, psi_inverse!
+export TravelTime, CompressionalWave, ShearWave
 
 end
