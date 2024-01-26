@@ -79,7 +79,7 @@ function parse_data_row(::Type{<:SeismicObservable}, PhsType, line; ValueType = 
 end
 function parse_data_row(::Type{SplittingParameters}, PhsType, line; ValueType = Float64)
     b = ( parse(ValueType, line[1]), parse(ValueType, line[2]) )
-    b = ( parse(ValueType, line[3]), parse(ValueType, line[4]) )
+    σ = ( parse(ValueType, line[3]), parse(ValueType, line[4]) )
     T, phs, sid, rid = ( parse(ValueType, line[5]), string(strip(line[6])), parse(Int, line[7]), string(strip(line[8])) )
     # Channel name assumed to be stored in column 9
     aPhase = length(line) > 9 ? PhsType(phs, T, parse(ValueType, line[10])) : PhsType(phs, T)
