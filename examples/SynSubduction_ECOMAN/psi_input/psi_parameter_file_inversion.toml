@@ -1,0 +1,110 @@
+[Output]
+output_directory = "psi_output/ANI_TTP_TTS" # If empty string, no results will be saved
+tf_time_stamp = false # Store results in time-stamped sub-directory under 'output_directory'
+
+# FORWARD PROBLEM PARAMETERS
+
+# OBSERVATIONS: Data to be modelled
+[Observations.TravelTime.CompressionalWave]
+filename = "psi_input/SYN_TravelTime_CompressionalWave.dat"
+[Observations.TravelTime.ShearWave]
+filename = "psi_input/SYN_TravelTime_ShearWave.dat"
+
+
+# MODEL: Starting model for forward modelling and inversion
+[Model]
+# Specify type of model and the parameterization
+type             = "PsiModel"
+parameterisation = "HexagonalVectoralVelocity"
+# Read parameters from file
+theModel = ""
+[Model.Parameters]
+# For initialising HexagonalVectoralVelocity models, need to define the following ratios between the
+# anisotropic magnitude parameter 'f' and the Thomsen parameters
+ratio_epsilon = -1.0
+ratio_eta     = 0.1996
+ratio_gamma   = -0.6364
+# Assign a coordinate system for this model
+[Model.CoordinateSystem]
+type   = "LocalGeographic" # Name of local coordinate system
+R_0    = 6371.0 # Reference Earth Radius (km)
+Lon_0  = 0.0 # Central longitude of model (deg.)
+Lat_0  = 0.0 # central latitude of model (deg.)
+Rot    = 0.0 # Model rotation about north (deg.)
+# Define the model dimensions and grid resolution
+[Model.Mesh]
+type = "RegularGrid"
+DX_1 = 15.0 # Half-width of model in x1-direction (i.e. longitude)
+DX_2 = 20.0 # Half-width of model in x2-direction (i.e. latitude)
+DX_3 = 1000.0 # Full-width of model in x3-direction (i.e. depth)
+NX_1 = 301 # Number of nodes in x1-direction
+NX_2 = 401 # Number of nodes in x2-direction
+NX_3 = 101 # Number of nodes in x3-direction
+# Define the data aquisition properties
+[Model.Aquisition]
+source_data   = "psi_input/Sources.dat" # Seismic source data (id, longitude, latitude, elevation)
+receiver_data = "psi_input/Receivers.dat" # Seismic receiver data (id, longitude, latitude, elevation)
+[Model.Methods.TauP]
+reference_model = "psi_input/iasp91_NoCrust.tvel" # iasp91_Subduction700km, iasp91_NoCrust.tvel"
+DL = 10.0 # Ray path resolution (km)
+
+
+
+# INVERSE PROBLEM PARAMETERS
+
+# SOURCE STATICS
+# A unique static for every Source-Observable-Phase tuple
+[Invert.SourceStatics.TravelTime]
+phases      = ["CompressionalWave", "ShearWave"] # Phase statics
+tf_jump     = [false, false] # Minimise cumulative (true) or incremental (false) perturbation norm with respect to the starting model
+damping     = [0.0, 0.0] # Static damping value for the i-th phase
+uncertainty = [1.0, 1.0] # A priori static uncertainty for the i-th phase
+
+# ISOTROPIC PARAMETERS
+[Invert.Velocity.Isotropic]
+parameterisation = "InverseIsotropicSlowness"
+coupling_option = 0
+[Invert.Velocity.Isotropic.Mesh]
+type = "RegularGrid"
+DX_1 = 15.0 # Extent of model in x1-direction (i.e. longitude)
+DX_2 = 20.0 # Extent of model in x2-direction (i.e. latitude)
+DX_3 = 1000.0 # Extent of model in x3-direction (i.e. depth)
+NX_1 = 61 # Number of nodes in x1-direction
+NX_2 = 81 # Number of nodes in x2-direction
+NX_3 = 21 # Number of nodes in x3-direction
+[Invert.Velocity.Isotropic.P]
+damping_weight = 2.0
+tf_min_cumulative = false
+smoothing_weights = [20.0, 20.0, 20.0]
+tf_smooth_cumulative = false
+[Invert.Velocity.Isotropic.S]
+damping_weight = 2.0
+tf_min_cumulative = false
+smoothing_weights = [20.0, 20.0, 20.0]
+tf_smooth_cumulative = false
+
+# ANISOTROPIC PARAMETERS
+[Invert.Velocity.Anisotropic.Mesh]
+type = "RegularGrid"
+DX_1 = 15.0 # Extent of model in x1-direction (i.e. longitude)
+DX_2 = 20.0 # Extent of model in x2-direction (i.e. latitude)
+DX_3 = 1000.0 # Extent of model in x3-direction (i.e. depth)
+NX_1 = 61 # Number of nodes in x1-direction
+NX_2 = 81 # Number of nodes in x2-direction
+NX_3 = 21 # Number of nodes in x3-direction
+[Invert.Velocity.Anisotropic.Orientations]
+parameterisation = "InverseAzRadVector"
+damping_weight = 2.0
+tf_min_cumulative = false #true
+smoothing_weights = [20.0, 20.0, 20.0]
+tf_smooth_cumulative = false
+
+
+# SOLVER: Inverse method
+[Solver]
+type   = "SolverLSQR" # Solver
+atol   = 1.0e-6 # Absolute tolerance
+conlim = 1.0e8 # Convergence limit
+maxiter = 1e6 # Maximum number of solver iterations
+tf_jac_scale = true # Apply Jacobian scaling
+nonliniter = 5 # Number of non-linear iterations
