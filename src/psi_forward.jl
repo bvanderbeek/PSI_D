@@ -772,7 +772,7 @@ function qs_phase_velocities(propagation_azimuth, propagation_elevation, qt_pola
     # Get Thomsen parameters
     α, β, ϵ, δ, γ = return_thomsen_parameters(Parameters, index)
     # Compute angle between propagation direction and symmetry axis
-    cosθ, ζ = symmetry_axis_cosine(symmetry_azimuth, symmetry_elevation, propagation_azimuth, propagation_elevation, qt_polarization)
+    cosθ, ζ = symmetry_axis_cosine(Parameters.azimuth[index], Parameters.elevation[index], propagation_azimuth, propagation_elevation, qt_polarization)
     cosθ_2 = cosθ^2
     sinθ_2 = 1.0 - cosθ_2
     # Compute qS phase velocities
