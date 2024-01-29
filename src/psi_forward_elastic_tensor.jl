@@ -61,8 +61,10 @@ function ElasticVoigt(Parameters::HexagonalVectoralVelocity)
 end
 
 function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; dlm = ",", T = Float64)
+    # Read header information 
+    tf_density_normalized = parse(Bool, strip(readline(io)))
+    # tf_global_cartesian = parse(Bool, strip(readline(io)))
     # Allocate parameter structure
-    tf_density_normalized = parse(Bool, readline(io))
     Parameters = ElasticVoigt(T, size(Mesh); tf_density_normalized = tf_density_normalized)
     # Read and populate parameters
     k = 0
@@ -93,6 +95,21 @@ function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; d
         Parameters.c66[k] = parse(T, line[24])
         # Store density (kg/m³)
         tf_density_normalized ? nothing : Parameters.ρ[k] = parse(T, line[25])
+        # # Rotate to local geographic coordinates
+        # if tf_global_cartesian
+        #     # Rotate the Voigt tensor to the local geographic frame
+        #     lon, lat = ( (π/180.0)*parse(T, line[1]),  (π/180.0)*parse(T, line[2]) )
+        #     R = rotation_matrix((-lon, lat), (3, 2))
+        #     C = return_voigt_matrix(Parameters, k)
+        #     C = rotate_voigt(C, R)
+        #     Parameters.c11[k], Parameters.c12[k], Parameters.c13[k], Parameters.c14[k], Parameters.c15[k],
+        #     Parameters.c16[k], Parameters.c22[k], Parameters.c23[k], Parameters.c24[k], Parameters.c25[k],
+        #     Parameters.c26[k], Parameters.c33[k], Parameters.c34[k], Parameters.c35[k], Parameters.c36[k],
+        #     Parameters.c44[k], Parameters.c45[k], Parameters.c46[k], Parameters.c55[k], Parameters.c56[k],
+        #     Parameters.c66[k] = (C[1,1], C[1,2], C[1,3], C[1,4], C[1,5], C[1,6], C[2,2],
+        #     C[2,3], C[2,4], C[2,5], C[2,6], C[3,3], C[3,4], C[3,5],
+        #     C[3,6], C[4,4], C[4,5], C[4,6], C[5,5], C[5,6], C[6,6])
+        # end
     end
     close(io)
 
@@ -275,6 +292,24 @@ function elastic_from_thomsen(α, β, ϵ, δ, γ, tf_exact; ρ = 1.0)
         0.0 0.0 0.0 c44 0.0 0.0;
         0.0 0.0 0.0 0.0 c44 0.0;
         0.0 0.0 0.0 0.0 0.0 c66
+    ]
+
+    return C
+end
+function return_voigt_matrix(V::ElasticVoigt, index)
+    c11, c12, c13, c14, c15, c16, c22, c23, c24, c25, c26, c33, c34, c35, c36, c44, c45, c46, c55, c56, c66 =
+    (V.c11[index], V.c12[index], V.c13[index], V.c14[index], V.c15[index], V.c16[index],
+    V.c22[index], V.c23[index], V.c24[index], V.c25[index], V.c26[index],
+    V.c33[index], V.c34[index], V.c35[index], V.c36[index],
+    V.c44[index], V.c45[index], V.c46[index],
+    V.c55[index], V.c56[index], V.c66[index])
+    C = @SMatrix [
+        c11 c12 c13 c14 c15 c16;
+        c12 c22 c23 c24 c25 c26;
+        c13 c23 c33 c34 c35 c36;
+        c14 c24 c34 c44 c45 c46;
+        c15 c25 c35 c45 c55 c56;
+        c16 c26 c36 c46 c56 c66
     ]
 
     return C
