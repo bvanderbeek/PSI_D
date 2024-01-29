@@ -273,7 +273,7 @@ end
 
 
 # Directed Search for Optimal Splitting Parameters
-function splitting_parameters_search(s1, s2, sampling_period, split_time, split_azimuth; objective_function = transverse_energy_minimization,
+function splitting_parameters_search(s1, s2, sampling_period, split_time, split_azimuth; objective_function = trace_covariance_minimization,
     δt = 10.0*sampling_period, δζ = 10.0*π/180.0, δt_min = sampling_period, δζ_min = π/180.0, α = 0.5, maxit = 100)
 
     # Define objective function
