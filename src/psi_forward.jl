@@ -356,7 +356,7 @@ function psi_forward(parameter_file::String)
             date_now, time_now = (split(date_now, "-"), split(time_now, ":"))
             PsiParameters["Output"]["output_directory"] *= "/"*date_now[1][3:4]*prod(date_now[2:end])*"_"*prod(time_now[1:2])*time_now[3][1:2]
         end
-        mkdir(PsiParameters["Output"]["output_directory"])
+        mkpath(PsiParameters["Output"]["output_directory"])
         # Save predictions and copy of parameter file
         write_observations(PsiParameters["Output"]["output_directory"], Observations; alt_data = predictions, prepend = "SYN")
         path_filename = splitdir(parameter_file)
