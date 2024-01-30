@@ -60,10 +60,14 @@ function ElasticVoigt(Parameters::HexagonalVectoralVelocity)
     return V
 end
 
-function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; dlm = ",", T = Float64)
+function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; dlm = ",", T = Float64,
+    tf_global_cartesian = true, tf_reverse_x3 = true)
     # Read header information 
-    tf_density_normalized = parse(Bool, strip(readline(io)))
-    # tf_global_cartesian = parse(Bool, strip(readline(io)))
+    tf_density_normalized = split(readline(io), dlm)
+    tf_density_normalized = parse(Bool, strip(tf_density_normalized[1]))
+    # Scalar to convert elastic coefficients from GPa to Pa
+    # Density-normalized elastic coefficients are assumed to be in m²/s²
+    a = tf_density_normalized ? 1.0 : 1.0e9
     # Allocate parameter structure
     Parameters = ElasticVoigt(T, size(Mesh); tf_density_normalized = tf_density_normalized)
     # Read and populate parameters
@@ -71,47 +75,75 @@ function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; d
     for line in readlines(io)
         k += 1
         line = split(line, dlm)
-        # Store elastic parameters (Pa)
-        Parameters.c11[k] = parse(T, line[4])
-        Parameters.c12[k] = parse(T, line[5])
-        Parameters.c13[k] = parse(T, line[6])
-        Parameters.c14[k] = parse(T, line[7])
-        Parameters.c15[k] = parse(T, line[8])
-        Parameters.c16[k] = parse(T, line[9])
-        Parameters.c22[k] = parse(T, line[10])
-        Parameters.c23[k] = parse(T, line[11])
-        Parameters.c24[k] = parse(T, line[12])
-        Parameters.c25[k] = parse(T, line[13])
-        Parameters.c26[k] = parse(T, line[14])
-        Parameters.c33[k] = parse(T, line[15])
-        Parameters.c34[k] = parse(T, line[16])
-        Parameters.c35[k] = parse(T, line[17])
-        Parameters.c36[k] = parse(T, line[18])
-        Parameters.c44[k] = parse(T, line[19])
-        Parameters.c45[k] = parse(T, line[20])
-        Parameters.c46[k] = parse(T, line[21])
-        Parameters.c55[k] = parse(T, line[22])
-        Parameters.c56[k] = parse(T, line[23])
-        Parameters.c66[k] = parse(T, line[24])
+        # Store elastic parameters (Pa or m²/s²)
+        Parameters.c11[k] = a*parse(T, line[4])
+        Parameters.c12[k] = a*parse(T, line[5])
+        Parameters.c13[k] = a*parse(T, line[6])
+        Parameters.c14[k] = a*parse(T, line[7])
+        Parameters.c15[k] = a*parse(T, line[8])
+        Parameters.c16[k] = a*parse(T, line[9])
+        Parameters.c22[k] = a*parse(T, line[10])
+        Parameters.c23[k] = a*parse(T, line[11])
+        Parameters.c24[k] = a*parse(T, line[12])
+        Parameters.c25[k] = a*parse(T, line[13])
+        Parameters.c26[k] = a*parse(T, line[14])
+        Parameters.c33[k] = a*parse(T, line[15])
+        Parameters.c34[k] = a*parse(T, line[16])
+        Parameters.c35[k] = a*parse(T, line[17])
+        Parameters.c36[k] = a*parse(T, line[18])
+        Parameters.c44[k] = a*parse(T, line[19])
+        Parameters.c45[k] = a*parse(T, line[20])
+        Parameters.c46[k] = a*parse(T, line[21])
+        Parameters.c55[k] = a*parse(T, line[22])
+        Parameters.c56[k] = a*parse(T, line[23])
+        Parameters.c66[k] = a*parse(T, line[24])
         # Store density (kg/m³)
         tf_density_normalized ? nothing : Parameters.ρ[k] = parse(T, line[25])
-        # # Rotate to local geographic coordinates
-        # if tf_global_cartesian
-        #     # Rotate the Voigt tensor to the local geographic frame
-        #     lon, lat = ( (π/180.0)*parse(T, line[1]),  (π/180.0)*parse(T, line[2]) )
-        #     R = rotation_matrix((-lon, lat), (3, 2))
-        #     C = return_voigt_matrix(Parameters, k)
-        #     C = rotate_voigt(C, R)
-        #     Parameters.c11[k], Parameters.c12[k], Parameters.c13[k], Parameters.c14[k], Parameters.c15[k],
-        #     Parameters.c16[k], Parameters.c22[k], Parameters.c23[k], Parameters.c24[k], Parameters.c25[k],
-        #     Parameters.c26[k], Parameters.c33[k], Parameters.c34[k], Parameters.c35[k], Parameters.c36[k],
-        #     Parameters.c44[k], Parameters.c45[k], Parameters.c46[k], Parameters.c55[k], Parameters.c56[k],
-        #     Parameters.c66[k] = (C[1,1], C[1,2], C[1,3], C[1,4], C[1,5], C[1,6], C[2,2],
-        #     C[2,3], C[2,4], C[2,5], C[2,6], C[3,3], C[3,4], C[3,5],
-        #     C[3,6], C[4,4], C[4,5], C[4,6], C[5,5], C[5,6], C[6,6])
-        # end
+        # Rotate to local geographic coordinates
+        if tf_global_cartesian
+            # Rotate the Voigt tensor from global cartesian to the local geographic coordinate system
+            lon, lat = ( (π/180.0)*parse(T, line[1]),  (π/180.0)*parse(T, line[2]) )
+            R = rotation_matrix((-lon, lat), (3, 2))
+            C = return_voigt_matrix(Parameters, k)
+            C = rotate_voigt(C, R)
+            # Re-arrange the tensor such that c₁₁ = East = y_global, c₂₂ = North = z_global, and c₃₃ = Radial = x_global
+            # after applying the above rotation
+            Parameters.c11[k], Parameters.c12[k], Parameters.c13[k], Parameters.c14[k], Parameters.c15[k],
+            Parameters.c16[k], Parameters.c22[k], Parameters.c23[k], Parameters.c24[k], Parameters.c25[k],
+            Parameters.c26[k], Parameters.c33[k], Parameters.c34[k], Parameters.c35[k], Parameters.c36[k],
+            Parameters.c44[k], Parameters.c45[k], Parameters.c46[k], Parameters.c55[k], Parameters.c56[k],
+            Parameters.c66[k] = (C[2,2], C[2,3], C[1,2], C[2,5], C[2,6], C[2,4], C[3,3],
+            C[1,3], C[3,5], C[3,6], C[3,4], C[1,1], C[1,5], C[1,6],
+            C[1,4], C[5,5], C[5,6], C[4,5], C[6,6], C[4,6], C[4,4])
+        end
     end
     close(io)
+
+    # VIZTOMO elastic models are ordered by decreasing depth
+    # PSI_D models are ordered by increasing depth
+    if tf_reverse_x3
+        reverse!(Parameters.c11)
+        reverse!(Parameters.c12)
+        reverse!(Parameters.c13)
+        reverse!(Parameters.c14)
+        reverse!(Parameters.c15)
+        reverse!(Parameters.c16)
+        reverse!(Parameters.c22)
+        reverse!(Parameters.c23)
+        reverse!(Parameters.c24)
+        reverse!(Parameters.c25)
+        reverse!(Parameters.c26)
+        reverse!(Parameters.c33)
+        reverse!(Parameters.c34)
+        reverse!(Parameters.c35)
+        reverse!(Parameters.c36)
+        reverse!(Parameters.c44)
+        reverse!(Parameters.c45)
+        reverse!(Parameters.c46)
+        reverse!(Parameters.c55)
+        reverse!(Parameters.c56)
+        reverse!(Parameters.c66)
+    end
 
     return Parameters
 end
