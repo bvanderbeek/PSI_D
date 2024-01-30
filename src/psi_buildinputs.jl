@@ -8,11 +8,11 @@ function build_inputs(param_file)
 
     # Model
     if isempty(D["Model"]["theModel"])
-        model_type = eval(Symbol(D["Model"]["type"]))
-        Model = build_model(model_type, D["Model"])
+        # model_type = eval(Symbol(D["Model"]["type"]))
+        Model = build_model(PsiModel, D["Model"])
     else
-        model_type = eval(Symbol(D["Model"]["type"]))
-        Model = load_model(model_type, D["Model"])
+        # model_type = eval(Symbol(D["Model"]["type"]))
+        Model = load_model(PsiModel, D["Model"])
     end
 
     # Inversion Parameters
@@ -281,8 +281,8 @@ function read_model(::Type{LocalGeographic}, ::Type{RegularGrid}, parameterisati
     # Build the coordinate system for this model
     Geometry = LocalGeographic(λ₀, ϕ₀, R₀, β)
     # Build the mesh for this model
-    x₁ = range(start = xlim[1], stop = xlim[4], length = nx[1])
-    x₂ = range(start = xlim[2], stop = xlim[5], length = nx[2])
+    x₁ = range(start = xlim[1], stop = xlim[4], length = nx[1]) .- λ₀ # Local spherical coordinates!
+    x₂ = range(start = xlim[2], stop = xlim[5], length = nx[2]) .- ϕ₀ # Local spherical coordinates!
     x₃ = range(start = xlim[6], stop = xlim[3], length = nx[3]) # Reversed!
     Mesh = RegularGrid(Geometry, (x₁, x₂, x₃))
     # Read in model parameters. This will close the file.
