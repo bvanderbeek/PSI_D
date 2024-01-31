@@ -143,6 +143,7 @@ function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; d
         reverse!(Parameters.c55)
         reverse!(Parameters.c56)
         reverse!(Parameters.c66)
+        tf_density_normalized ? nothing : reverse!(Parameters.ρ)
     end
 
     return Parameters
