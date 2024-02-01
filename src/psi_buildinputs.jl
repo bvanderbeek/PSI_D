@@ -274,16 +274,16 @@ function read_model(::Type{LocalGeographic}, ::Type{RegularGrid}, parameterisati
     line = readline(io)
     line = split(line, dlm)
     nx = (parse(Int, line[1]), parse(Int, line[2]), parse(Int, line[3]))
-    # Read next header line that defines extent of model (min-x₁, min-x₂, min-x₃, max-x₁, max-x₂, max-x₃)
+    # Read next header line that defines extent of model (arc-wdith, arc_height, max_depth)
     line = readline(io)
     line = split(line, dlm)
-    xlim = (parse(T, line[1]), parse(T, line[2]), parse(T, line[3]), parse(T, line[4]), parse(T, line[5]), parse(T, line[6]))
+    Δx = (parse(T, line[1]), parse(T, line[2]), parse(T, line[3]))
     # Build the coordinate system for this model
     Geometry = LocalGeographic(λ₀, ϕ₀, R₀, β)
     # Build the mesh for this model
-    x₁ = range(start = xlim[1], stop = xlim[4], length = nx[1]) .- λ₀ # Local spherical coordinates!
-    x₂ = range(start = xlim[2], stop = xlim[5], length = nx[2]) .- ϕ₀ # Local spherical coordinates!
-    x₃ = range(start = xlim[6], stop = xlim[3], length = nx[3]) # Reversed!
+    x₁ = range(start = -Δx[1], stop = Δx[1], length = nx[1]) # Local spherical coordinates!
+    x₂ = range(start = -Δx[2], stop = Δx[2], length = nx[2]) # Local spherical coordinates!
+    x₃ = range(start = 0.0, stop = -Δx[3], length = nx[3]) # Reversed!
     Mesh = RegularGrid(Geometry, (x₁, x₂, x₃))
     # Read in model parameters. This will close the file.
     Parameters = read_model_parameters(io, parameterisation, Mesh; dlm = dlm, T = T)

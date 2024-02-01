@@ -199,8 +199,9 @@ end
 function print_mesh(fid, Mesh::RegularGrid)
     n1, n2, n3 = size(Mesh)
     xminmax, yminmax, zminmax = (extrema(Mesh.x[1]), extrema(Mesh.x[2]), extrema(Mesh.x[3]))
+    Δx = (xminmax[2] - xminmax[1], yminmax[2] - yminmax[1], zminmax[2] - zminmax[1])
     println(fid, n1,", ",n2,", ",n3)
-    println(fid, xminmax[1],", ",yminmax[1],", ",zminmax[1],", ",xminmax[2],", ",yminmax[2],", ",zminmax[2])
+    println(fid, 0.5*Δx[1],", ",0.5*Δx[2],", ",Δx[3])
     return nothing
 end
 # Print any necessary parameter headers
