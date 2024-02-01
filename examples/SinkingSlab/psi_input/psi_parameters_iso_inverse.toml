@@ -1,0 +1,107 @@
+##############
+### OUTPUT ###
+##############
+
+[Output]
+# Output directory where results will be stored. If empty, no results will be written.
+output_directory = "psi_output/ISO_TTP"
+# If true, creates a time-stamped (yymmdd_hhmms) folder in 'output_directory' where results
+# will be written. Convenient for generating unique output folder names.
+tf_time_stamp = false
+
+#######################
+### FORWARD PROBLEM ###
+#######################
+
+# OBSERVATIONS: Data to be modelled.
+[Observations.TravelTime.CompressionalWave]
+filename = "psi_output/SYN_SinkingBlock/SYN_TravelTime_CompressionalWave.dat"
+
+# MODEL: Starting model for forward calculation
+[Model]
+parameterisation = "IsotropicVelocity" # Specify model parameterisation ("IsotropicVelocity", "HexagonalVectoralVelocity", or "ElasticVoigt")
+theModel = "" # Leave empty to use the TauP 1D reference model as the starting model
+[Model.CoordinateSystem]
+type   = "LocalGeographic" # Specify model coordinate system ("LocalGeographic" is the only option currently available)
+# If not loading an external 3D model, must define additional coordinate system parameters
+R_0    = 6371.0 # Reference Earth Radius (km)
+Lon_0  = 90.0 # Central longitude of model (deg.)
+Lat_0  = 0.0 # central latitude of model (deg.)
+Rot    = 0.0 # Model rotation about north (deg.)
+[Model.Mesh]
+type = "RegularGrid" # Specify the model discretization type ("RegularGrid" is the only option currently available)
+# If not loading an external 3D model, must define the model grid vectors
+DX_1 = 10.0 # Half-width of model in x1-direction (i.e. longitude)
+DX_2 = 10.0 # Half-width of model in x2-direction (i.e. latitude)
+DX_3 = 660.0 # Full-width of model in x3-direction (i.e. depth)
+NX_1 = 201 # Number of nodes in x1-direction
+NX_2 = 201 # Number of nodes in x2-direction
+NX_3 = 67 # Number of nodes in x3-direction
+# Define the data aquisition properties
+[Model.Aquisition]
+source_data   = "psi_input/Sources.dat" # Seismic source data (id, longitude, latitude, elevation)
+receiver_data = "psi_input/Receivers.dat" # Seismic receiver data (id, longitude, latitude, elevation)
+# TauP parameters
+[Model.Methods.TauP]
+reference_model = "psi_input/ak135_no_crust.tvel" # Reference mode for computing 1D ray paths
+DL = 10.0 # Ray path resolution (km)
+
+#######################
+### INVERSE PROBLEM ###
+#######################
+
+# SOURCE STATICS
+# A unique static for every Source-Observable-Phase tuple
+[Invert.SourceStatics.TravelTime] # Type of static to invert for
+phases      = ["CompressionalWave"] # Array of phase types to include (e.g., "CompressionalWave", "ShearWave" )
+# Flag to minimise the cumulative (true) or incremental (false) perturbation norm with respect to the starting model
+# for each Observable-Phase pair.
+tf_jump     = [false] # tf_jump[i] corresponds to phases[i]
+# Array of damping values for each Observable-Phase pair. If damping[i] = 0.0, no norm-based damoing is applied.
+damping     = [0.0] # Must be >= 0.0; damping[i] corresponds to phases[i]
+# Array of static uncertainties for each Observable-Phase pair. Damping values are inversely scaled by the
+# uncertainty. No effect on solution when damping = 0.0. This parameter will be deprecated as it can be incorporated
+# into 'damping'
+uncertainty = [1.0] # Must be >= 0.0; damping[i] corresponds to phases[i]
+# Additional static types can be added for additional observation types by definning a new heading 
+# [Invert.ReceiverStatics.Observable] under which the same parameters as above are repeated.
+
+# RECEIVER STATICS
+# These are defined in the same manner as SOURCE STATICS under the heading [Invert.ReceiverStatics.Observable]
+
+# ISOTROPIC PARAMETERS
+[Invert.Velocity.Isotropic]
+# Define the parameterization for the isotropic inversion. Currently, the only option is "InverseIsotropicSlowness".
+# In the future, one may want to invert directly for velocity or relative velocity perturbations (i.e. dlnV).
+parameterisation = "InverseIsotropicSlowness"
+# For future use with joint P and S velocity inversions. Will describe how to couple P and S velocity perturbations.
+# The only option currently implemented is '0' which does not enforce any coupling between P and S velocity perturbations.
+coupling_option = 0
+[Invert.Velocity.Isotropic.Mesh]
+# Define the grid on which the isotropic inversion parameters are discretized.
+# The inversion grid is seperate from the forward model grid such that we can choose to solve for heterogeneity on
+# a coarser scale than the starting model. This is useful when the starting model contains a priori fine-scale
+# structure (e.g., sediment basins).
+type = "RegularGrid" # The model discretization type ("RegularGrid" is the only option currently available)
+DX_1 = 10.0 # Extent of model in x1-direction (i.e. longitude)
+DX_2 = 10.0 # Extent of model in x2-direction (i.e. latitude)
+DX_3 = 660.0 # Extent of model in x3-direction (i.e. depth)
+NX_1 = 41 # Number of nodes in x1-direction
+NX_2 = 41 # Number of nodes in x2-direction
+NX_3 = 23 # Number of nodes in x3-direction
+[Invert.Velocity.Isotropic.P]
+# Regularization parameters for P-velocity fields
+damping_weight = 1.0 # Damping multiplier for limiting model-norm
+tf_min_cumulative = false # Minimise cumulative (true) or incremental (false) perturbation norm with respect to the starting model
+smoothing_weights = [10.0, 10.0, 10.0] # Smoothing multiplier for forcing spatially smooth velocity perturbations in x1-, x2-, and x3-directions
+tf_smooth_cumulative = false # Minimise cumulative (true) or incremental (false) Laplacian with respect to the starting model
+
+# SOLVER
+[Solver]
+# Set the solver parameters for the inversion.
+type   = "SolverLSQR" # Type of solver. Only LSQR-based method "SolverLSQR" is implemented. LBFGS and gradient descent planed for future releases.
+atol   = 1.0e-6 # Absolute tolerance for LSQR algorithm
+conlim = 1.0e8 # Convergence limit for LSQR algorithm
+maxiter = 1e6 # Maximum number of solver iterations for LSQR algorithm
+tf_jac_scale = true # If true, apply Levenberg-Marquardt style scaling of the regularization constraints to equalize sensitivity across parameter fields.
+nonliniter = 1 # Number of non-linear iterations (i.e. forward calculations and LSQR calls)

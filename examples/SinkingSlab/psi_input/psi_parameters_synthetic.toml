@@ -1,0 +1,39 @@
+##############
+### OUTPUT ###
+##############
+
+[Output]
+# Output directory where results will be stored. If empty, no results will be written.
+output_directory = "psi_output/SYN_SinkingBlock"
+# If true, creates a time-stamped (yymmdd_hhmms) folder in 'output_directory' where results
+# will be written. Convenient for generating unique output folder names.
+tf_time_stamp = false
+
+#######################
+### FORWARD PROBLEM ###
+#######################
+
+# OBSERVATIONS: Data to be modelled.
+[Observations.TravelTime.CompressionalWave]
+filename = "psi_input/DUMMY_TravelTime_CompressionalWave.dat"
+[Observations.TravelTime.ShearWave]
+filename = "psi_input/DUMMY_TravelTime_ShearWave.dat"
+[Observations.SplittingIntensity.ShearWave]
+filename = "psi_input/DUMMY_SplittingIntensity_ShearWave.dat"
+
+# MODEL: Starting model for forward calculation
+[Model]
+parameterisation = "ElasticVoigt" # Specify model parameterisation ("IsotropicVelocity", "HexagonalVectoralVelocity", or "ElasticVoigt")
+theModel = "psi_input/psitomo0020.dat" # Data file with 3D model parameters
+[Model.CoordinateSystem]
+type   = "LocalGeographic" # Specify model coordinate system ("LocalGeographic" is the only option currently available)
+[Model.Mesh]
+type = "RegularGrid" # Specify the model discretization type ("RegularGrid" is the only option currently available)
+# Define the data aquisition properties
+[Model.Aquisition]
+source_data   = "psi_input/Sources.dat" # Seismic source data (id, longitude, latitude, elevation)
+receiver_data = "psi_input/Receivers.dat" # Seismic receiver data (id, longitude, latitude, elevation)
+# TauP parameters
+[Model.Methods.TauP]
+reference_model = "psi_input/ak135_no_crust.tvel" # Reference mode for computing 1D ray paths
+DL = 10.0 # Ray path resolution (km)
