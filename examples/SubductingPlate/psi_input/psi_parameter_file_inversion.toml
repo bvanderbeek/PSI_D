@@ -45,7 +45,7 @@ NX_3 = 101 # Number of nodes in x3-direction
 source_data   = "psi_input/Sources.dat" # Seismic source data (id, longitude, latitude, elevation)
 receiver_data = "psi_input/Receivers.dat" # Seismic receiver data (id, longitude, latitude, elevation)
 [Model.Methods.TauP]
-reference_model = "psi_input/iasp91_NoCrust.tvel" # iasp91_Subduction700km, iasp91_NoCrust.tvel"
+reference_model = "psi_input/ak135_no_crust.tvel" # Modified AK135 model without crust
 DL = 10.0 # Ray path resolution (km)
 
 
