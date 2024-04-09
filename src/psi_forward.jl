@@ -170,8 +170,18 @@ function return_anisotropic_ratios(Parameters::HexagonalVectoralVelocity{T, R}, 
 end
 function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity{T, R}, index) where {T, R}
     α, β, ϵ, δ, γ = return_thomsen_parameters(Parameters, index)
-    vip = α*sqrt( 1.0 + (16/15)*ϵ + (4/15)*δ )
-    vis = β*sqrt( 1.0 + (2/3)*γ + (2/15)*((α^2)/(β^2))*(ϵ - δ) )
+    if Parameters.tf_exact
+        g33 = α^2
+        g44 = β^2
+        g11 = (1.0 + 2.0*ϵ)*g33
+        g66 = (1.0 + 2.0*γ)*g44
+        g13 = sqrt(δ*(g33^2) + 0.5*(g33 - g44)*(g11 + g33 - 2.0*g44)) - g44
+        vip = sqrt((1/15)*(8.0*g11 + 3.0*g33 + 8.0*g44 + 4.0*g13))
+        vis = sqrt((1/15)*(g11 + g33 + 6.0*g44 + 5.0*g66 - 2.0*g13))
+    else
+        vip = α*sqrt( 1.0 + (16/15)*ϵ + (4/15)*δ )
+        vis = β*sqrt( 1.0 + (2/3)*γ + (2/15)*((α^2)/(β^2))*(ϵ - δ) )
+    end
     return vip, vis
 end
 function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity{T, R}) where {T, R}
@@ -974,7 +984,7 @@ function return_local_path!(d, r, t, λ, ϕ, Mesh::RegularGrid; tf_first_out = t
         iout += -1 # Keep last node out
         # Check first node out is not receiver
         if iout >= (M - 1)
-            error("Receiver located outside model space!")
+            error("Receiver located outside model space!"*" Geographic: ",(λ[end], ϕ[end], r[end]),"; Local: ",(x[end],y[end],z[end]))
         end
     else
         # Find first node inside model counting from source-side
