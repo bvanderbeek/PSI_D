@@ -30,7 +30,7 @@ xrcv = Vector{NTuple{3, Float64}}(undef, nrcv) # Receiver coordinates
 k = 0
 for ϕ in rcv_lat
     for λ in rcv_lon
-        k += 1
+        global k += 1 # Allows script to be run from command line
         rid[k] = "SYN"*string(k; pad = 4)
         xrcv[k] = (λ, ϕ, rcv_elv)
     end
@@ -54,7 +54,7 @@ xsrc = Vector{NTuple{3, Float64}}(undef, nsrc) # Source coordinates
 k = 0
 for Δ in dlt
     for θ in baz
-        k += 1
+        global k += 1 # Allows script to be run from command line
         src_lat, src_lon = PSI_D.direct_geodesic(ref_lat, ref_lon, Δ, θ; tf_degrees = true)
         sid[k] = k
         xsrc[k] = (src_lon, src_lat, src_elv)
@@ -89,7 +89,7 @@ SIs = Vector{typeof(a_SIs)}(undef, nobs)
 n = 0
 for id_src in eachindex(Sources.id)
     for id_rcv in eachindex(Receivers.id)
-        n += 1
+        global n += 1 # Allows script to be run from command line
         TTp[n] = PSI_D.TravelTime(PSI_D.CompressionalWave(p_phase, period), PSI_D.ForwardTauP(),
         id_src, id_rcv, dummy_obs, obs_error)
         TTs[n] = PSI_D.TravelTime(PSI_D.ShearWave(s_phase, period, s_polarization), PSI_D.ForwardTauP(),
@@ -104,12 +104,12 @@ end
 ####################################
 
 # Write the Sources and Receivers structures to data files
-PSI_D.write_psi_structure(path*"/psi_input/Sources.dat", Sources)
-PSI_D.write_psi_structure(path*"/psi_input/Receivers.dat", Receivers)
+# PSI_D.write_psi_structure(path*"/psi_input/Sources.dat", Sources)
+# PSI_D.write_psi_structure(path*"/psi_input/Receivers.dat", Receivers)
 
 # Writing observations. By default, observation filenames have the format, 'Observable_Phase.dat' where
 # 'Observable' is the type of observation (e.g. TravelTime) and 'Phase' is the type of phase (e.g. ShearWave).
 # There is also the option to prepend any string to the beginning of the file name.
-PSI_D.write_observations(path*"/psi_input/", TTp; prepend = "DUMMY")
-PSI_D.write_observations(path*"/psi_input/", TTs; prepend = "DUMMY")
-PSI_D.write_observations(path*"/psi_input/", SIs; prepend = "DUMMY")
+# PSI_D.write_observations(path*"/psi_input/", TTp; prepend = "DUMMY")
+# PSI_D.write_observations(path*"/psi_input/", TTs; prepend = "DUMMY")
+# PSI_D.write_observations(path*"/psi_input/", SIs; prepend = "DUMMY")
