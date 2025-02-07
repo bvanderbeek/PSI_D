@@ -91,6 +91,7 @@ function global_to_local_angles(azimuth, elevation, lon_lat_elv, Geometry::Local
     local_azimuth = atan( v[2], v[1] )
     local_elevation = atan( v[3], sqrt((v[1]^2) + (v[2]^2)) )
 
+    @warn "This disagrees with ecef_to_local_orientation!"
     return local_azimuth, local_elevation
 end
 function local_to_global_angles(azimuth, elevation, lon_lat_elv, Geometry::LocalGeographic)
@@ -101,6 +102,7 @@ function local_to_global_angles(azimuth, elevation, lon_lat_elv, Geometry::Local
     global_azimuth = atan(w[3], w[2])
     global_elevation = atan(w[1], sqrt((w[2]^2) + (w[3]^2)))
 
+    @warn "This disagrees with ecef_to_local_orientation!"
     return global_azimuth, global_elevation
 end
 
@@ -199,6 +201,7 @@ function ecef_to_local_orientation(lon_deg, lat_deg, azm_rad, elv_rad)
     # Local azimuth and elevation
     azm = atan(v[3], v[2]) # East-North Plane
     elv = atan(v[1], sqrt( (v[2]^2) + (v[3]^2) )) # Angle from horizontal plane
+    azm, elv = cos(elv) > 1e-9 ? (azm, elv) : (0.0, elv)
 
     return azm, elv
 end
