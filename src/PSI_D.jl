@@ -11,6 +11,7 @@ using LinearAlgebra
 using TOML
 using WriteVTK
 using Dates
+using Plots # Needed for splitting parameter grid search functions
 
 include("psi_coordinate_systems.jl")
 include("psi_forward.jl")
