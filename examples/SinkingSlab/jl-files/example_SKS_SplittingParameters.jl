@@ -1,10 +1,12 @@
 # EXAMPLE SKS SPLITTING PARAMETERS
 # An interactive approach for making and plotting SKS splitting parameters.
 # Path names reference are relative to the 'SinkingSlab' example directory.
+# THIS MODEL IS IN GLOBAL CARTESIAN NOT LOCAL COORDINATES!
 using Plots
 using PSI_D
 # Extract path to SinkingSlab example directory
 path, _ = splitdir(@__DIR__)
+cd(path)
 
 ###############################
 ### ADD SKS EVENTS TO MODEL ###
