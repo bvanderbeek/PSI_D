@@ -195,6 +195,9 @@ end
 function return_reference_velocities(Parameters::HexagonalVectoralVelocity{T,R}, vip, vis, index) where {T, R}
     _, _, ϵ, δ, γ = return_thomsen_parameters(Parameters, index)
     α = vip/sqrt( 1.0 + (16/15)*ϵ + (4/15)*δ )
+    # (vis^2) < (2/15)*(ϵ - δ)*(α^2) ? println((vip, vis, α, ϵ, δ, γ)) : nothing
+    # β = sqrt( ((vis^2) - (2/15)*(ϵ - δ)*(α^2))/(1.0 + (2/3)*γ) ) # ...this domain-errors when P and S not included in inversion....
+    # Old expression using invariant velocities directly; should be equivalent to above
     β = sqrt( (vis^2)*( 1.0 - 2.0*((vip^2)/(vis^2))*((ϵ - δ)/(15.0 + 16.0*ϵ + 4.0*δ)) )/( 1.0 + (2/3)*γ ) )
     return α, β
 end
@@ -296,6 +299,10 @@ abstract type SeismicPhase end
 struct CompressionalWave <: SeismicPhase
     name::String
     period::Float64
+end
+# Allows construction of CompressionalWave when polarization read from file
+function CompressionalWave(phase_name::String, period::Float64, ::Float64)
+    return CompressionalWave(phase_name, period)
 end
 struct ShearWave <: SeismicPhase
     name::String
@@ -598,7 +605,8 @@ function interpolate_kernel_parameters!(KernelParameters::IsotropicVelocity, ker
         # Convert the global kernel coordinates into the local coordinate system
         qx = global_to_local(qx_global[1], qx_global[2], qx_global[3], Model.Mesh.Geometry)
         # Get trilinear interpolation weights
-        wind, wval = trilinear_weights(Model.Mesh.x, qx; tf_extrapolate = false, scale = 1.0)
+        wind, wval = trilinear_weights(Model.Mesh.x, qx; tf_extrapolate = true, scale = 1.0) # Without extrapolation, elevation causes NaN!!!
+        qx[3] > Model.Mesh.x[3][1] && @warn "Point above model!"
         # Interpolate field flag
         tf_interpolate = (vp = ~isnothing(KernelParameters.vp), vs = ~isnothing(KernelParameters.vs))
         # Interpolate fields
@@ -630,7 +638,8 @@ function interpolate_kernel_parameters!(KernelParameters::HexagonalVectoralVeloc
         # Convert the global kernel coordinates into the local coordinate system
         qx = global_to_local(qx_global[1], qx_global[2], qx_global[3], Model.Mesh.Geometry)
         # Get trilinear interpolation weights
-        wind, wval = trilinear_weights(Model.Mesh.x, qx; tf_extrapolate = false, scale = 1.0)
+        wind, wval = trilinear_weights(Model.Mesh.x, qx; tf_extrapolate = true, scale = 1.0) # Without extrapolation, elevation causes NaN!!!
+        qx[3] > Model.Mesh.x[3][1] && @warn "Point above model!"
         # Interpolate fields
         (s1, s2, s3) = (0.0, 0.0, 0.0)
         for (j, wj) in enumerate(wval)
