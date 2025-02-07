@@ -62,6 +62,8 @@ end
 
 function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; dlm = ",", T = Float64,
     tf_global_cartesian = true)
+    # Note! There is currently a mix of psitomo models in local vs global coordinates
+    tf_global_cartesian ? println("Reading Global Cartesian Tensors!") : println("Reading Local Cartesian Tensors!")
     # Read header information 
     tf_density_normalized = split(readline(io), dlm)
     tf_density_normalized = parse(Bool, strip(tf_density_normalized[1]))
@@ -123,7 +125,6 @@ function read_model_parameters(io, parameterisation::Type{ElasticVoigt}, Mesh; d
 
     # VIZTOMO elastic models are ordered by decreasing depth
     # PSI_D models are ordered by increasing depth
-
     if x3_last[1] == Mesh.x[3][1]
         println("Reversing 3rd dimension!")
         reverse!(Parameters.c11, dims = 3)
