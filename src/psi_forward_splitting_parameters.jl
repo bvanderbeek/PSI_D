@@ -409,7 +409,7 @@ end
 # Basic Pattern Search Optimization
 function pattern_search_optimization(fobj, x::NTuple{2,T}, δx::NTuple{2,T}; δx_min = 0.1.*δx, α = 0.5, maxit = 100) where {T}
     # Search stencil
-    stencil = ((-1, 0), (0, -1), (1, 0), (0, 1))
+    stencil = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)) # ((-1, 0), (0, -1), (1, 0), (0, 1))
     # Objective function at initial guess
     fj = fobj(x)
     # Iterate pattern search
@@ -427,6 +427,7 @@ function pattern_search_optimization(fobj, x::NTuple{2,T}, δx::NTuple{2,T}; δx
             x = x .+ (δx.*stencil[nmin]) # Update guess when new minimum found
         else
             δx = α.*δx # Otherwise, reduce search lengths
+            δx = (max(δx[1], δx_min[1]), max(δx[2], δx_min[2]))
         end
         # Continue iterating until minimum step size or maximum number of iterations are reached
         numit += 1
