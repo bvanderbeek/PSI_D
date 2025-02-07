@@ -153,10 +153,11 @@ function build_mesh(::Type{RegularGrid}, D::Dict, Geometry::LocalGeographic)
     NX1 = D["NX_1"]
     NX2 = D["NX_2"]
     NX3 = D["NX_3"]
+    X3_start = haskey(D, "X3_start") ? D["X3_start"] : 0.0 # Option to shift model surface to include elevation
     # Grid coordinate vectors
     x1 = range(start = -DX1, stop = DX1, length = NX1)
     x2 = range(start = -DX2, stop = DX2, length = NX2)
-    x3 = range(start = 0.0, stop = -DX3, length = NX3)
+    x3 = range(start = X3_start, stop = -DX3 + X3_start, length = NX3)
 
     return RegularGrid(Geometry, (x1, x2, x3));
 end
@@ -164,7 +165,8 @@ end
 # Read seismic source data from file
 function build_sources(f; dlm = ",", data_type = Float64)
     # Determine if IDs are integers or strings
-    id_type, convert_id = get_id_type(f; index = 1, dlm = dlm)
+    # id_type, convert_id = get_id_type(f; index = 1, dlm = dlm)
+    id_type = Int # Force Integer ID
 
     # Number of sources
     n = countlines(f)
@@ -178,7 +180,8 @@ function build_sources(f; dlm = ",", data_type = Float64)
         k += 1
         # Split the line
         line = split(line, dlm, keepempty = false)
-        id[k] = convert_id(strip(line[1]))
+        # id[k] = convert_id(strip(line[1]))
+        id[k] = parse(Int, line[1])
         lon = parse(data_type, line[2])
         lat = parse(data_type, line[3])
         elv = parse(data_type, line[4])
@@ -191,7 +194,8 @@ end
 # Read seismic source data from file
 function build_receivers(f; dlm = ",", data_type = Float64)
     # Determine if IDs are integers or strings
-    id_type, convert_id = get_id_type(f; index = 1, dlm = dlm)
+    # id_type, convert_id = get_id_type(f; index = 1, dlm = dlm)
+    id_type = String # Force String ID
 
     # Number of sources
     n = countlines(f)
@@ -205,7 +209,8 @@ function build_receivers(f; dlm = ",", data_type = Float64)
         k += 1
         # Split the line
         line = split(line, dlm, keepempty = false)
-        id[k] = convert_id(strip(line[1]))
+        # id[k] = convert_id(strip(line[1]))
+        id[k] = strip(line[1])
         lon = parse(data_type, line[2])
         lat = parse(data_type, line[3])
         elv = parse(data_type, line[4])
@@ -278,12 +283,13 @@ function read_model(::Type{LocalGeographic}, ::Type{RegularGrid}, parameterisati
     line = readline(io)
     line = split(line, dlm)
     Δx = (parse(T, line[1]), parse(T, line[2]), parse(T, line[3]))
+    dz_ext = length(line) > 3 ? parse(T, line[4]) : 0.0 # Read starting depth for vertically extended models
     # Build the coordinate system for this model
     Geometry = LocalGeographic(λ₀, ϕ₀, R₀, β)
     # Build the mesh for this model
     x₁ = range(start = -Δx[1], stop = Δx[1], length = nx[1]) # Local spherical coordinates!
     x₂ = range(start = -Δx[2], stop = Δx[2], length = nx[2]) # Local spherical coordinates!
-    x₃ = range(start = 0.0, stop = -Δx[3], length = nx[3]) # Reversed!
+    x₃ = range(start = dz_ext, stop = -Δx[3] + dz_ext, length = nx[3]) # Reversed! Depth vector include vertical extension
     Mesh = RegularGrid(Geometry, (x₁, x₂, x₃))
     # Read in model parameters. This will close the file.
     Parameters = read_model_parameters(io, parameterisation, Mesh; dlm = dlm, T = T)
