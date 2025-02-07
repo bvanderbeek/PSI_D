@@ -1,4 +1,19 @@
 
+function write_coordinates_to_vtk(output_file::String, Data)
+    n = length(Data.id)
+    xg, yg, zg, v = Vector{Float64}(undef, n), Vector{Float64}(undef, n), Vector{Float64}(undef, n), Vector{Float64}(undef, n)
+    for k in eachindex(Data.coordinates)
+        lon, lat, elv = Data.coordinates[k]
+        xg[k], yg[k], zg[k] = geographic_to_global(lon, lat, elv; radius = 6371.0)
+        v[k] = elv
+    end
+    cells = [MeshCell(VTKCellTypes.VTK_VERTEX, (i, )) for i = 1:n]
+    vtk_grid(output_file, xg, yg, zg, cells) do vtk
+        vtk["elevation"] = v
+    end
+
+    return nothing
+end
 # Write PsiModel{<:IsotropicVelocity} to VTK-file 
 function write_model_to_vtk(output_file::String, Model::PsiModel{<:IsotropicVelocity}; vp_ref = nothing, vs_ref = nothing)
     # Define global coordinates
@@ -201,7 +216,7 @@ function print_mesh(fid, Mesh::RegularGrid)
     xminmax, yminmax, zminmax = (extrema(Mesh.x[1]), extrema(Mesh.x[2]), extrema(Mesh.x[3]))
     Δx = (xminmax[2] - xminmax[1], yminmax[2] - yminmax[1], zminmax[2] - zminmax[1])
     println(fid, n1,", ",n2,", ",n3)
-    println(fid, 0.5*Δx[1],", ",0.5*Δx[2],", ",Δx[3])
+    println(fid, 0.5*Δx[1],", ",0.5*Δx[2],", ",Δx[3],", ",zminmax[2]) # Also print start depth for vertically extended models
     return nothing
 end
 # Print any necessary parameter headers
@@ -214,6 +229,15 @@ function print_header(fid, Parameters::HexagonalVectoralVelocity)
         println(fid, Parameters.tf_exact,", ",Parameters.ratio_ϵ[1],", ",Parameters.ratio_η[1],", ",Parameters.ratio_γ[1])
     else
         println(fid, Parameters.tf_exact)
+    end
+    return nothing
+end
+# Print header information for ElasticVoigt parameter data file
+function print_header(fid, Parameters::ElasticVoigt)
+    if size(Parameters.ρ) == size(Parameters.c11)
+        println(fid, false)
+    else
+        println(fid, true)
     end
     return nothing
 end
@@ -234,6 +258,18 @@ function print_parameters(fid, n, coords, Parameters::HexagonalVectoralVelocity)
         Parameters.ratio_ϵ[n],", ",Parameters.ratio_η[n],", ",Parameters.ratio_γ[n])
     end
 
+    return nothing
+end
+# Print ElasticVoigt parameters
+function print_parameters(fid, n, coords, Parameters::ElasticVoigt)
+    n == 1 ? (@warn "Incomplete function: ElasticVoigt parameters need to be rotated back to global cartesian!") : nothing
+    a = size(Parameters.ρ) == size(Parameters.c11) ? 1.0e-9 : 1.0
+    println(fid, coords[1],", ",coords[2],", ",coords[3],", ",
+    a*Parameters.c11[n],", ",a*Parameters.c12[n],", ",a*Parameters.c13[n],", ",a*Parameters.c14[n],", ",a*Parameters.c15[n],", ",
+    a*Parameters.c16[n],", ",a*Parameters.c22[n],", ",a*Parameters.c23[n],", ",a*Parameters.c24[n],", ",a*Parameters.c25[n],", ",
+    a*Parameters.c26[n],", ",a*Parameters.c33[n],", ",a*Parameters.c34[n],", ",a*Parameters.c35[n],", ",a*Parameters.c36[n],", ",
+    a*Parameters.c44[n],", ",a*Parameters.c45[n],", ",a*Parameters.c46[n],", ",a*Parameters.c55[n],", ",a*Parameters.c56[n],", ",
+    a*Parameters.c66[n],", ",Parameters.ρ[n])
     return nothing
 end
 
