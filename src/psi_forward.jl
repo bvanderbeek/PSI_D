@@ -176,11 +176,20 @@ function return_isotropic_velocities(Parameters::HexagonalVectoralVelocity{T, R}
         g11 = (1.0 + 2.0*ϵ)*g33
         g66 = (1.0 + 2.0*γ)*g44
         g13 = sqrt(δ*(g33^2) + 0.5*(g33 - g44)*(g11 + g33 - 2.0*g44)) - g44
-        vip = sqrt((1/15)*(8.0*g11 + 3.0*g33 + 8.0*g44 + 4.0*g13))
-        vis = sqrt((1/15)*(g11 + g33 + 6.0*g44 + 5.0*g66 - 2.0*g13))
+        vip = α > 0.0 ? sqrt((1/15)*(8.0*g11 + 3.0*g33 + 8.0*g44 + 4.0*g13)) : 0.0
+        vis = β > 0.0 ? sqrt((1/15)*(g11 + g33 + 6.0*g44 + 5.0*g66 - 2.0*g13)) : 0.0
     else
-        vip = α*sqrt( 1.0 + (16/15)*ϵ + (4/15)*δ )
-        vis = β*sqrt( 1.0 + (2/3)*γ + (2/15)*((α^2)/(β^2))*(ϵ - δ) )
+        # fp = 1.0 + (16/15)*ϵ + (4/15)*δ
+        # fs = 1.0 + (2/3)*γ + (2/15)*((α^2)/(β^2))*(ϵ - δ)
+        # if fp < 0 || fs < 0
+        #     println((fp, fs))
+        #     println((α, β))
+        #     println((ϵ, δ, γ))
+        #     @error "Non-physical anisotropy"
+        # end
+        # vip, vis = α*sqrt(fp), β*sqrt(fs)
+        vip = α > 0.0 ? α*sqrt( 1.0 + (16/15)*ϵ + (4/15)*δ ) : 0.0
+        vis = β > 0.0 ? β*sqrt( 1.0 + (2/3)*γ + (2/15)*((α^2)/(β^2))*(ϵ - δ) ) : 0.0
     end
     return vip, vis
 end
@@ -225,7 +234,14 @@ function ParametersTauP(; reference_model = "ak135", dL = 10.0)
 end
 # Shortest Path
 struct ForwardShortestPath <: ForwardMethod end
-struct ParametersShortestPath <: ForwardMethodParameters end
+struct ParametersShortestPath <: ForwardMethodParameters
+    dl::Float64
+    min_vert::Int
+    leaf_size::Int
+    iso_trace::Bool
+    grid_noise::Float64
+    forward_star::Int
+end
 # Finite Frequency
 struct ForwardFiniteFrequency <: ForwardMethod end
 struct ParametersFiniteFrequency <: ForwardMethodParameters end
@@ -394,23 +410,22 @@ end
 # PSI FORWARD: Vector of Observables + PSI Model
 # Assumption: Single observation type
 # Assumption: Kernel weight tuple has fixed names
+# Assumption: Single forward emthod
 function psi_forward(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Observable, P}
-    # Allocate storage arrays
-    n = length(Observations)
-    val_type = eltype(Model.Mesh.x[1]) # Type assumed for model parameter and coordinate values
-    obs_type = typeof(Observations[1].observation) # Type that stores an observation.......COULD FAIL FOR MULTIOBSERVABLES
-    predictions = Vector{obs_type}(undef, n)
-    relative_residuals = Vector{obs_type}(undef, n)
-    # Vector of kernels
-    param_type = return_kernel_parameter_type(P, val_type)
-    coord_type = Vector{NTuple{ndims(Model.Mesh), val_type}}
-    weight_type = Vector{NamedTuple{(:dr, :azimuth, :elevation), NTuple{3, val_type}}} # Assuming fixed names for weights!
-    KernelTypes = return_kernel_types(B, param_type, coord_type, weight_type, obs_type)
-    Kernels = Vector{KernelTypes}(undef, n); # Vector{ObservableKernel{B, param_type, coord_type, weight_type, Vector{obs_type}}}(undef, n)
-
-    # Compute kernels
-    for i in eachindex(Observations)
-        predictions[i], relative_residuals[i], Kernels[i] = psi_forward(Observations[i], Model)
+    # Assume single forward method for all observations!
+    if isa(Observations[1].Forward, ForwardTauP)
+        n = length(Observations)
+        obs_type = typeof(Observations[1].observation) # Type that stores an observation...COULD FAIL FOR MULTIOBSERVABLES
+        predictions = Vector{obs_type}(undef, n)
+        relative_residuals = Vector{obs_type}(undef, n)
+        Kernels = allocate_kernels_vector(Observations, Model)
+        for i in eachindex(Observations)
+            predictions[i], relative_residuals[i], Kernels[i] = psi_forward(Observations[i], Model)
+        end
+    elseif isa(Observations[1].Forward, ForwardShortestPath)
+        predictions, relative_residuals, Kernels, _ = psi_forward_seismic_dijkstra(Observations, Model; length_0 = 0.0, pred = 0)
+    else
+        error("Unknown forward method!")
     end
 
     return predictions, relative_residuals, Kernels
@@ -639,7 +654,7 @@ function interpolate_kernel_parameters!(KernelParameters::HexagonalVectoralVeloc
         qx = global_to_local(qx_global[1], qx_global[2], qx_global[3], Model.Mesh.Geometry)
         # Get trilinear interpolation weights
         wind, wval = trilinear_weights(Model.Mesh.x, qx; tf_extrapolate = true, scale = 1.0) # Without extrapolation, elevation causes NaN!!!
-        qx[3] > Model.Mesh.x[3][1] && @warn "Point above model!"
+        qx[3] > Model.Mesh.x[3][1] && @warn "Point above model! "*string((qx[3], Model.Mesh.x[3][1]))
         # Interpolate fields
         (s1, s2, s3) = (0.0, 0.0, 0.0)
         for (j, wj) in enumerate(wval)

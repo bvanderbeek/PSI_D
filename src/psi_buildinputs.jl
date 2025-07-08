@@ -3,8 +3,20 @@ function build_inputs(param_file)
     # Parse input toml-file
     D = TOML.parsefile(param_file)
 
-    # Build the observation structure 
-    Obs = build_observations(D["Observations"])
+    # Build the observation structure
+    # Get the forward method to assign to the observations
+    # Currently assumes one method!
+    length(D["Model"]["Methods"]) > 1 && error("Multiple forward methods not supported!")
+    if haskey(D["Model"]["Methods"], "TauP")
+        FwdType = ForwardTauP
+    elseif haskey(D["Model"]["Methods"], "ShortestPath")
+        FwdType = ForwardShortestPath
+    elseif haskey(D["Model"]["Methods"], "FiniteFrequency")
+        FwdType = ForwardFiniteFrequency
+    else
+        error("Could not identify forward method!")
+    end
+    Obs = build_observations(D["Observations"]; FwdType = FwdType)
 
     # Model
     if isempty(D["Model"]["theModel"])
@@ -227,10 +239,24 @@ function build_forward_methods(D::Dict)
         dL = D["TauP"]["DL"]
         MethodTauP = ParametersTauP(; reference_model = reference_model, dL = dL)
     else
-        MethodTauP = ParametersTauP()
+        MethodTauP = nothing
     end
-    MethodShortestPath = ParametersShortestPath()
-    MethodFiniteFrequency = ParametersFiniteFrequency()
+    if haskey(D, "ShortestPath")
+        dl = D["ShortestPath"]["dl"]
+        min_vert = D["ShortestPath"]["min_vert"]
+        leaf_size = D["ShortestPath"]["leaf_size"]
+        iso_trace = D["ShortestPath"]["iso_trace"]
+        grid_noise = D["ShortestPath"]["grid_noise"]
+        forward_star = D["ShortestPath"]["forward_star"]
+        MethodShortestPath = ParametersShortestPath(dl, min_vert, leaf_size, iso_trace, grid_noise, forward_star)
+    else
+        MethodShortestPath = nothing
+    end
+    if haskey(D, "FiniteFrequency")
+        MethodFiniteFrequency = ParametersFiniteFrequency()
+    else
+        MethodFiniteFrequency = nothing
+    end
 
     return ForwardMethodsContainer(MethodTauP, MethodShortestPath, MethodFiniteFrequency)
 end

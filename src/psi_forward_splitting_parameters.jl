@@ -54,8 +54,9 @@ end
 # EVALUATE KERNEL: Splitting Parameters
 function evaluate_kernel(Kernel::ObservableKernel{<:SplittingParameters})
     # Compute split waveform
-    S, Ts, Δt_weak, ζ_weak, _ = kernel_split_wavelet(Kernel)
-    s1, s2 = (@views S[1,:], @views S[2,:])
+    trace, _, Δt_weak, ζ_weak = kernel_split_wavelet(Kernel)
+    Ts = trace.sampling_period
+    s1, s2 = (@views trace.s[1,:], @views trace.s[2,:])
     # Search for optimal splitting parameters. Search begins at the estimated position (Δt_weak, ζ_weak)
     split_time, fast_azimuth, _ = splitting_parameters_search(s1, s2, Ts, Δt_weak, ζ_weak)
     # Remove sign of the split time. By my convention, fast-azimuths have negative split times
@@ -78,8 +79,9 @@ function evaluate_kernel(Kernel::ObservableKernel{<:SplittingParameters})
 
     return (split_time, fast_azimuth), (res_time, res_azim)
 end
-function kernel_split_wavelet(Kernel::ObservableKernel{<:SplittingParameters};
+function kernel_split_wavelet(Kernel::ObservableKernel;
     order = 1, sampling_period = 0.01*Kernel.Observation.Phase.period, relative_length = 2.0)
+    Kernel.Observation.Phase.period <= 0.0 && error("Infinte frequency split!")
 
     # Construct initial wavelet (linearly polarized on channel 1)
     fbins, U, τ, Ts = fd_gaussian_wavelet(Kernel.Observation.Phase.period, [1.0; 0.0];
@@ -87,23 +89,38 @@ function kernel_split_wavelet(Kernel::ObservableKernel{<:SplittingParameters};
     # Initalize apparent splitting coefficients for the dominant frequency
     γ11, γ12, dominant_frequency = (1.0 + 0.0im, 0.0 + 0.0im, 1.0/Kernel.Observation.Phase.period)
     # Propagate wavelet through anisotropic intervals
+    Δt_iso = 0.0 # Track isotropic delay
     for (index, w) in enumerate(Kernel.weights)
         # qS-phase velocities
         vqs1, vqs2, _, ζ = qs_phase_velocities(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
         Kernel.Observation.Phase.paz, Kernel.Parameters, index)
         # Delay of qS'-wave (symmetry axis polarization) with respect to qS''-wave
-        Δt = w.dr*((1.0/vqs1) - (1.0/vqs2))
+        Δt_1, Δt_2 = w.dr/vqs1, w.dr/vqs2 # Absolute delays
+        Δt_split = Δt_1 - Δt_2 # Split time (delay of qS' with respect to qS''; negative for fast symmetry axis)
+        Δt_iso += 0.5*(Δt_1 + Δt_2) # Isotropic delay
         # Split the waveform
-        fd_split_wavelet!(fbins, U, Δt, ζ)
+        fd_split_wavelet!(fbins, U, Δt_split, ζ)
         # Update apparent splitting coefficients
-        γ11, γ12 = reduced_splitting_operator(dominant_frequency, Δt, ζ, γ11, γ12)
+        γ11, γ12 = reduced_splitting_operator(dominant_frequency, Δt_split, ζ, γ11, γ12)
     end
     # Time-domain split waveform
-    S = ifft!(ifftshift(U, 2), 2)
+    S = real(ifft!(ifftshift(U, 2), 2))
+    t = range(
+        start = -Kernel.Observation.Phase.period*relative_length,
+        stop = Kernel.Observation.Phase.period*relative_length, length = length(fbins)
+        )
     # Analytic estimate of the splitting parameters
     Δt_weak, ζ_weak = weak_splitting_parameters(dominant_frequency, γ11, γ12)
 
-    return S, Ts, Δt_weak, ζ_weak, τ
+    # # Rotation matrices for reference to convert from principal coordinatess to QTL and XYZ
+    # Rqtl = rotation_matrix(Kernel.Observation.Phase.paz, 3)
+    # Rxyz = rotation_matrix((0.5*pi - Kernel.weights[end].elevation, Kernel.weights[end].azimuth), (2, 3))
+    # Rxyz = Rxyz*Rqtl
+
+    TimeDomain = (t = t, s = S, sampling_period = Ts, characteristic_period = τ, isotropic_delay = Δt_iso)
+    FreqDomain = (f = fbins, u = U)
+
+    return TimeDomain, FreqDomain, Δt_weak, ζ_weak
 end
 
 
@@ -449,4 +466,156 @@ function grid_search_optimization(fobj, x1, x2)
     end
 
     return x1[imin], x2[jmin], fmin, imin, jmin, Fsamp
+end
+
+function compute_polarization(u1, u2)
+    # Covariance matrix components
+    u1_mean, u2_mean, num_samples = mean(u1), mean(u2), length(u1)
+    c11, c22, c12 = 0.0, 0.0, 0.0
+    for i in 1:num_samples
+        u1_i, u2_i = u1[i] - u1_mean, u2[i] - u2_mean
+        c11 += u1_i^2
+        c22 += u2_i^2
+        c12 += u1_i*u2_i
+    end
+    # Solve eigen-value problem for polarization
+    F = eigen(@SArray [c11 c12; c12 c22])
+    # Find principal axis
+    _, jmax = findmax(abs.(F.values))
+    # Compute polarization angles
+    azm = atan(F.vectors[2,jmax], F.vectors[1,jmax])
+    return azm
+end
+
+# Convenience function for creating synthetic splitting observations
+function return_predicted_splits!(Kernels; relative_length = 2.0, rel_sampling_period = 0.01,
+    order = 2, rel_max_delay = 1.0, num_azimuths = 91, obj_func = trace_covariance_minimization)
+    
+    FWD = typeof(Kernels[1].Observation.Forward)
+    Observations = Vector{SplittingParameters{ShearWave, FWD, Int, String, Tuple{Float64, Float64}}}(undef, length(Kernels))
+    ζ_sampled = range(start = 0.0, stop = 0.5*π, length = num_azimuths)
+    for (i, K) in enumerate(Kernels)
+        dt_search = rel_max_delay*K.Observation.Phase.period
+        sampling_period = rel_sampling_period*K.Observation.Phase.period
+        Δt_sampled = range(start = -dt_search, stop = dt_search, length = 1 + round(Int, 2.0*rel_max_delay/rel_sampling_period))
+        # Compute split waveform
+        TimeDomain, FreqDomain, _ = kernel_split_wavelet(K; order = order, sampling_period = sampling_period, relative_length = relative_length)
+        # Find optimal splitting parameters (always returns fast axis and negative split time)
+        u1, u2 = @views TimeDomain.s[1,:], TimeDomain.s[2,:]
+        Δt_opt, ζ_opt = splitting_parameters_grid_search(
+            u1, u2, TimeDomain.sampling_period, Δt_sampled, ζ_sampled;
+            objective_function = obj_func, tf_plot = false
+            )
+        # Geographic fast azimuth -- surface projection of fast-axis -- assumes observations are similarly defined
+        R_rg = rotation_matrix(( 0.5*π - K.weights[end].elevation, K.weights[end].azimuth), (2, 3))
+        sinζ, cosζ = sincos(ζ_opt + K.Observation.Phase.paz) # Fast-axis components in QT-plane
+        fv = SVector(cosζ, sinζ, 0.0)
+        fv = R_rg*fv # Fast-axis components in ENZ-coordinates
+        fast_azm = atan(fv[2], fv[1])
+
+        # Reverse the split (done in principal coordinates)
+        fd_split_wavelet!(FreqDomain.f, FreqDomain.u, -Δt_opt, ζ_opt)
+        s = real(ifft(ifftshift(FreqDomain.u, 2), 2))
+        s1, s2 = @views s[1,:], s[2,:]
+        # Perturbation to polarization azimuth due to imperfect removal of split
+        dpazm = compute_polarization(s1, s2)
+        # Fill Observations
+        Observations[i] = SplittingParameters(
+            ShearWave(K.Observation.Phase.name, K.Observation.Phase.period, K.Observation.Phase.paz + dpazm),
+            K.Observation.Forward, K.Observation.source_id, K.Observation.receiver_id,
+            (abs(Δt_opt), fast_azm), (0.01, pi/180.0)
+            ) # No static adjustment
+    end
+    return Observations
+end
+
+# Convenience function for creating synthetic waveforms
+function write_synthetic_split_waveforms(out_dir, Kernels; rel_sampling_period = 0.01, relative_length = 5.0, order = 2)
+    rpd = 180.0/pi
+    for K in Kernels
+        # Compute split trace
+        Ts = rel_sampling_period*K.Observation.Phase.period
+        trace, _ = kernel_split_wavelet(K; order = order, sampling_period = Ts, relative_length = relative_length)
+
+        # Roate from S1-, S2-, L-coordinates to Q-, T-, L-coordinates
+        U = cat(trace.s, zeros(1, size(trace.s,2)); dims = 1)
+        Rqtl = rotation_matrix(K.Observation.Phase.paz, 3)
+        U .= Rqtl*U
+        # Very simple travel-time estimate -- max 2-component amplitude
+        a12 = sqrt.(U[1,:].^2 .+ U[2,:].^2)
+        _, jmax = findmax(a12)
+
+        # Roate from Q-, T-, L-coordinates to E-, N-, Z-coordinates
+        Rxyz = rotation_matrix((0.5*pi - K.weights[end].elevation, K.weights[end].azimuth), (2, 3))
+        U .= Rxyz*U
+
+        # Extract header information
+        t_start, t_end, n_samples = trace.t[1], trace.t[end], length(trace.t)
+        baz, inc, paz = rpd*K.weights[end].azimuth - 180.0, 90.0 - rpd*K.weights[end].elevation, rpd*K.Observation.Phase.paz
+        src_id, rcv_id = string(K.Observation.source_id), K.Observation.receiver_id
+        Td = string(round(Int, 1000.0*K.Observation.Phase.period))
+        # Write file
+        fid = open(out_dir * "/SYN." * src_id * "." * rcv_id * ".ENZ.T" * Td * "ms.dat", "w")
+        println(fid, t_start,", ",t_end,", ",n_samples)
+        println(fid, baz,", ",inc,", ",paz)
+        println(fid, trace.isotropic_delay,", ",trace.t[jmax])
+        for j in 1:n_samples
+            println(fid, U[1,j],", ",U[2,j],", ",U[3,j])
+        end
+        close(fid)
+    end
+    return nothing
+end
+
+
+# Plotting Functions
+function station_averaged_splits(Observations, Receivers)
+    nrcv = length(Receivers.id)
+    x, y, u, v = zeros(nrcv), zeros(nrcv), zeros(nrcv), zeros(nrcv)
+    num = zeros(Int, nrcv)
+    for B in Observations
+        jrcv = Receivers.id[B.receiver_id]
+        x[jrcv], y[jrcv], _ = Receivers.coordinates[jrcv]
+        Δt, ϕ = B.observation
+        u[jrcv] += abs(Δt)*cos(2.0*ϕ)
+        v[jrcv] += abs(Δt)*sin(2.0*ϕ)
+        num[jrcv] += 1
+    end
+    u ./= num
+    v ./= num
+    # Remove NaNs
+    irmv = findall(num .== 0)
+    deleteat!(x, irmv)
+    deleteat!(y, irmv)
+    deleteat!(u, irmv)
+    deleteat!(v, irmv)
+    ϕ, Δt = 0.5*atan.(v, u), sqrt.((u.^2) + (v.^2))
+
+    #(u, v) = ( Δt.*cos.(ϕ), Δt.*sin.(ϕ) );
+    #quiver(x, y, quiver = (u, v), aspect_ratio = :equal)
+    return x, y, Δt, ϕ
+end
+
+function quiver_plot(x, y, r, azm; scale = 1.0)
+    H = plot()
+    for i in eachindex(x)
+        Δx, Δy = scale*abs(r[i])*cos(azm[i]), scale*abs(r[i])*sin(azm[i])
+        plot!(H, [x[i] - Δx, x[i] + Δx], [y[i] - Δy, y[i] + Δy], color = :black, linewidth = 2, label = nothing)
+    end
+    plot!(H, aspect_ratio = :equal)
+    display(H)
+    return H
+end
+function quiver_plot(Observations, Receivers; scale = 1.0)
+    H = plot()
+    for B in Observations
+        jrcv = Receivers.id[B.receiver_id]
+        x, y, _ = Receivers.coordinates[jrcv]
+        r, azm = B.observation
+        Δx, Δy = scale*abs(r)*cos(azm), scale*abs(r)*sin(azm)
+        plot!(H, [x - Δx, x + Δx], [y - Δy, y + Δy], color = :black, linewidth = 2, label = nothing)
+    end
+    plot!(H, aspect_ratio = :equal)
+    display(H)
+    return H
 end
