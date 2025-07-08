@@ -11,38 +11,36 @@ function psi_forward_seismic_dijkstra(Observations, Model; length_0 = 0.0, pred 
         start_points, end_points = Model.Sources.coordinates, Model.Receivers.coordinates
     end
 
-    # Infer phase
-    if isa(Observations[1].Phase, CompressionalWave)
-        phase, WaveType = SeismicDijkstra.BodyP(), CompressionalWave
-    elseif isa(Observations[1].Phase, ShearWave)
-        phase, WaveType = SeismicDijkstra.BodySmean(), ShearWave
-    else
-        error("Unknown phase!")
-    end
-
     # Loop over initialisation points
-    tt_sp, tt_kernel, rel_res = zeros(length(Observations)), zeros(length(Observations)), zeros(length(Observations))
+    num_obs, obs_type = length(Observations), typeof(Observations[1].observation) # Observation value type (assumed uniform...would fail for SplittingParameters + TravelTimes, for example)
+    predictions, rel_res, tt_sp = Vector{obs_type}(undef, num_obs), Vector{obs_type}(undef, num_obs), zeros(num_obs)
     Kernels = allocate_kernels_vector(Observations, Model)
     n, npt = 0, length(itinerary)
-    for (i_start, destinations) in itinerary
-        lon_start, lat_start, elv_start = start_points[i_start]
+    for (departure, destinations) in itinerary
+        # Define phase for SeismicDijkstra
+        if departure[2] == "P"
+            phase_i = SeismicDijkstra.BodyP()
+        elseif departure[2] == "S"
+            phase_i = SeismicDijkstra.BodySmean()
+        else
+            error("Foreign phase!")
+        end
+        lon_start, lat_start, elv_start = start_points[departure[1]]
         a_i = geographic_to_local(lon_start, lat_start, elv_start, Model.Mesh.Geometry)
         x_start = geographic_to_global(a_i[1], a_i[2], a_i[3]; radius = Model.Mesh.Geometry.R₀)
-        D = SeismicDijkstra.initialize_dijkstra(G, SVector(x_start); phase = phase, length_0 = length_0, pred = pred)
-        @time SeismicDijkstra.dijkstra!(D, G; phase = phase)
+        D = SeismicDijkstra.initialize_dijkstra(G, SVector(x_start); phase = phase_i, length_0 = length_0, pred = pred)
+        @time SeismicDijkstra.dijkstra!(D, G; phase = phase_i)
 
         # Loop over end points to extract times and paths
         for (j_obs, i_end) in destinations
-            !isa(Observations[j_obs].Forward, ForwardShortestPath) && error("Mixed Forward methods not supported!")
-            !isa(Observations[j_obs].Phase, WaveType) && error("3D raytracing not implemented for mixed-phase observation vector!")
             lon_end, lat_end, elv_end = end_points[i_end]
             b_i = geographic_to_local(lon_end, lat_end, elv_end, Model.Mesh.Geometry)
             x_end = geographic_to_global(b_i[1], b_i[2], b_i[3]; radius = Model.Mesh.Geometry.R₀)
-            t_min, xyz_path, vert_path = SeismicDijkstra.get_path(D, G, SVector(x_end); phase = phase, length_0 = length_0)
+            t_min, xyz_path, vert_path = SeismicDijkstra.get_path(D, G, SVector(x_end); phase = phase_i, length_0 = length_0)
             !tf_reverse && reverse!(xyz_path; dims = 2) # Reverse the path for source-initialisation
 
             t_min, xyz_path = SeismicDijkstra.refine_path(G, xyz_path, Model.Methods.ShortestPath.dl;
-                phase=phase, dist=length_0, min_vert=Model.Methods.ShortestPath.min_vert)
+                phase = phase_i, dist = length_0, min_vert = Model.Methods.ShortestPath.min_vert)
 
             # Rotate to true global cartesian! Needed for kernel creation!
             xyz_path .= Model.Mesh.Geometry.Rₘ*xyz_path
@@ -63,20 +61,18 @@ function psi_forward_seismic_dijkstra(Observations, Model; length_0 = 0.0, pred 
 
             kernel_parameters = return_kernel_parameters(Observations[j_obs], Model, kernel_coordinates)
             kernel_static = return_kernel_static(Observations[j_obs], Model)
-            # kernel_static += length_0 # Update! Need to include case for SWS parameters
             Kernels[j_obs] = ObservableKernel(Observations[j_obs], kernel_parameters, kernel_coordinates, kernel_weights, kernel_static)
 
-            # Predictions and residuals...try also with evaluate kernel
-            tt_kernel[j_obs], _ = evaluate_kernel(Kernels[j_obs])
-            rel_res[j_obs] = (Observations[j_obs].observation - tt_kernel[j_obs])/Observations[j_obs].error
+            # Predictions and residuals
+            predictions[j_obs], rel_res[j_obs] = evaluate_kernel(Kernels[j_obs])
             tt_sp[j_obs] = t_min
         end
 
         n += 1
-        println("Finished initialisation point " * string(n) * " of " * string(npt) * ".")
+        println("Finished initialisation point " * string(n) * " of " * string(npt) * " (",departure[2],").")
     end
 
-    return tt_kernel, rel_res, Kernels, tt_sp
+    return predictions, rel_res, Kernels, tt_sp
 end
 
 function allocate_kernels_vector(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Observable, P}
@@ -197,20 +193,38 @@ function isotropic_weights(vert_weights::SeismicDijkstra.ThomsenVelocity)
     return SeismicDijkstra.IsotropicVelocity(vp, vs)
 end
 
+# Itinerary is a list of start points and destinations for ray tracing.
+# The start points are defined by a unique (a, Phase) tuple where the "a" is
+# either a source or receiver index and the Phase is either "P" or "S". The
+# destinations for each start point is a vector of unique (k_obs, b) tuples where
+# "b" is either a source or receiver index and "k_obs" is the corresponding index
+# in the observation vector. The itinerary is a dictionary with the start point as
+# the keys and the destinations as the values.
 function build_itinerary(Observations, Sources, Receivers)
-    # Dictionary of initialisation indices (keys) and the observation and destination indices (values)
-    src_init = Dict{Int, Vector{NTuple{2, Int}}}()
-    [src_init[Sources.id[B_k.source_id]] = Vector{NTuple{2, Int}}() for B_k in Observations]
+    # Phase identifying functions
+    get_phase(Phase::CompressionalWave) = "P"
+    get_phase(Phase::ShearWave) = "S"
+
+    # Check Assumptions
     for (k, B_k) in enumerate(Observations)
-        push!(src_init[Sources.id[B_k.source_id]], (k, Receivers.id[B_k.receiver_id]))
+        !isa(B_k.Forward, ForwardShortestPath) && error("Mixed forward methods not supported!")
+        phs_k = uppercase(B_k.Phase.name)
+        phs_k != "P" && phs_k != "S" && error("Only direct phases are supported!")
     end
 
-    rcv_init = Dict{Int, Vector{NTuple{2, Int}}}()
-    [rcv_init[Receivers.id[B_k.receiver_id]] = Vector{NTuple{2, Int}}() for B_k in Observations]
+    # Source initialization itinerary
+    src_init = Dict{Tuple{Int, String}, Vector{NTuple{2, Int}}}()
+    [src_init[(Sources.id[B_k.source_id], get_phase(B_k.Phase))] = Vector{NTuple{2, Int}}() for B_k in Observations]
     for (k, B_k) in enumerate(Observations)
-        push!(rcv_init[Receivers.id[B_k.receiver_id]], (k, Sources.id[B_k.source_id]))
+        push!(src_init[(Sources.id[B_k.source_id], get_phase(B_k.Phase))], (k, Receivers.id[B_k.receiver_id]))
     end
-
+    # Receiver initialization itinerary
+    rcv_init = Dict{Tuple{Int, String}, Vector{NTuple{2, Int}}}()
+    [rcv_init[(Receivers.id[B_k.receiver_id], get_phase(B_k.Phase))] = Vector{NTuple{2, Int}}() for B_k in Observations]
+    for (k, B_k) in enumerate(Observations)
+        push!(rcv_init[(Receivers.id[B_k.receiver_id], get_phase(B_k.Phase))], (k, Sources.id[B_k.source_id]))
+    end
+    # Return itinerary with fewest initialzation points
     itinerary, tf_reverse = length(rcv_init) < length(src_init) ? (rcv_init, true) : (src_init, false)
 
     return itinerary, tf_reverse
