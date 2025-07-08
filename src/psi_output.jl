@@ -1,9 +1,10 @@
 
 function write_coordinates_to_vtk(output_file::String, Data)
-    n = length(Data.id)
+    n, k = length(Data.id), 0
     xg, yg, zg, v = Vector{Float64}(undef, n), Vector{Float64}(undef, n), Vector{Float64}(undef, n), Vector{Float64}(undef, n)
-    for k in eachindex(Data.coordinates)
+    for k in eachindex(Data.coordinates) # BPV KLUDGE to deal with error when more coordinates than IDs because of non-unique IDs. Hengill issue.
         lon, lat, elv = Data.coordinates[k]
+        k += 1
         xg[k], yg[k], zg[k] = geographic_to_global(lon, lat, elv; radius = 6371.0)
         v[k] = elv
     end
