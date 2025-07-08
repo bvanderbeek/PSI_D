@@ -168,12 +168,16 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
     _, b, Kernels = psi_forward(Observations, ForwardModel)
     # Initial sum of squared (relative) residuals
     wssr_k = sum(b -> b^2, b; init = 0.0)
+    wsum = sum(K -> (1.0/K.Observation.error)^2, Kernels; init = 0.0)
+    ssr_k = 0.0
+    [ssr_k += (b[i]*K_i.Observation.error)^2 for (i, K_i) in enumerate(Kernels)]
 
     # Create file to store data fit at each iteration
     if !isempty(output_directory)
         fid_fit = open(output_directory*"/chi_squared.txt", "w")
         println(fid_fit, "F-crit (n = ", nobs,", alpha = 0.95): ",fcrit)
-        println(fid_fit, "0, ",wssr_k/nobs)
+        println(fid_fit, "iteration, chi-squared, RMS, weighted RMS")
+        println(fid_fit, "0, ",wssr_k/nobs,", ",sqrt(ssr_k/nobs),", ",sqrt(wssr_k/wsum))
     end
 
     # Inner inversion iterations (i.e. no kernel sensitivity update)
@@ -214,8 +218,11 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         
         # Re-evalute weighted sum of the squared resdiuals
         _, b = evaluate_kernel(Kernels)
+        # Compute sum of squared residuals
         wssr_l = sum(b -> b^2, b)
-        !isempty(output_directory) ? println(fid_fit, kiter + 1,", ",wssr_l/nobs) : nothing
+        ssr_l = 0.0
+        [ssr_l += (b[i]*K_i.Observation.error)^2 for (i, K_i) in enumerate(Kernels)]
+        !isempty(output_directory) ? println(fid_fit, kiter + 1,", ",wssr_l/nobs,", ",sqrt(ssr_l/nobs),", ",sqrt(wssr_l/wsum)) : nothing
         # Compute new fstat
         fstat = wssr_k/wssr_l
         # Check for divergence. For non-linear inversions the solution can bounce around once it reaches a minimum.
@@ -225,6 +232,8 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
             update_kernel!(Kernels, PerturbationModel)
             _, b = evaluate_kernel(Kernels)
             wssr_l = sum(b -> b^2, b)
+            ssr_l = 0.0
+            [ssr_l += (b[i]*K_i.Observation.error)^2 for (i, K_i) in enumerate(Kernels)]
             fstat = wssr_k/wssr_l
             # This line search tends to not converge suggesting that the regularisation is controlling the gradient when the
             # LSQR solution diverges. In this case, the regularization weights need to be reduced for the solution to improve.
@@ -236,10 +245,10 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
 
         # Display fit summary for this iteration
         println("F-stat = ", string(fstat), " | F-crit = ", string(fcrit))
-        println("wssrₖ₋₁ = ", string(wssr_k), " | wssrₖ = ", string(wssr_l))
+        println("rmsₖ₋₁ = ", string(sqrt(ssr_k/nobs)), " | rmsₖ = ", string(sqrt(ssr_l/nobs))," (",string(sqrt(wssr_l/wsum)),")")
         println("χ²ₖ₋₁ = ", string(wssr_k/nobs), " | ", "χ²ₖ = ", string(wssr_l/nobs), "\n")
         # Update prior fit
-        wssr_k = wssr_l
+        wssr_k, ssr_k = wssr_l, ssr_l
 
         # Update iteration counter
         kiter += 1
