@@ -19,9 +19,11 @@ function build_inputs(param_file)
     Obs = build_observations(D["Observations"]; FwdType = FwdType)
 
     # Model
-    if isempty(D["Model"]["theModel"])
+    model_file = isempty(D["Model"]["theModel"]) ? D["Model"]["Methods"]["TauP"]["reference_model"] : D["Model"]["theModel"]
+    mext = split(model_file, ".")
+    if isempty(mext[end]) || mext[end] == "nd" || mext[end] == "tvel"
         # model_type = eval(Symbol(D["Model"]["type"]))
-        Model = build_model(PsiModel, D["Model"])
+        Model = build_model(PsiModel, D["Model"], model_file)
     else
         # model_type = eval(Symbol(D["Model"]["type"]))
         Model = load_model(PsiModel, D["Model"])
@@ -116,7 +118,7 @@ end
 
 
 
-function build_model(::Type{PsiModel}, D::Dict)
+function build_model(::Type{PsiModel}, D::Dict, ref_model)
     # Define coordinate system
     coords = eval(Symbol(D["CoordinateSystem"]["type"]))
     Geometry = build_coordinate_system(coords, D["CoordinateSystem"])
@@ -135,16 +137,16 @@ function build_model(::Type{PsiModel}, D::Dict)
     # Define Parameterisation
     parameterisation = eval(Symbol(D["parameterisation"]))
     
-    return build_model(parameterisation, D, Mesh, Sources, Receivers, Methods)
+    return build_model(parameterisation, D, Mesh, Sources, Receivers, Methods, ref_model)
 end
-function build_model(::Type{<:IsotropicVelocity}, D::Dict, Mesh, Sources, Receivers, Methods)
-    return PsiModel(IsotropicVelocity, Mesh, Sources, Receivers, Methods)
+function build_model(::Type{<:IsotropicVelocity}, D::Dict, Mesh, Sources, Receivers, Methods, ref_model)
+    return PsiModel(IsotropicVelocity, Mesh, Sources, Receivers, Methods, ref_model)
 end
-function build_model(::Type{<:HexagonalVectoralVelocity}, D::Dict, Mesh, Sources, Receivers, Methods)
+function build_model(::Type{<:HexagonalVectoralVelocity}, D::Dict, Mesh, Sources, Receivers, Methods, ref_model)
     ratio_ϵ = D["Parameters"]["ratio_epsilon"]
     ratio_η = D["Parameters"]["ratio_eta"]
     ratio_γ = D["Parameters"]["ratio_gamma"]
-    return PsiModel(HexagonalVectoralVelocity, ratio_ϵ, ratio_η, ratio_γ, Mesh, Sources, Receivers, Methods)
+    return PsiModel(HexagonalVectoralVelocity, ratio_ϵ, ratio_η, ratio_γ, Mesh, Sources, Receivers, Methods, ref_model)
 end
 
 function build_coordinate_system(::Type{LocalGeographic}, D::Dict)

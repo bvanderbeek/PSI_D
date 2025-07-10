@@ -180,8 +180,10 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         println(fid_fit, "0, ",wssr_k/nobs,", ",sqrt(ssr_k/nobs),", ",sqrt(wssr_k/wsum))
     end
 
-    # Inner inversion iterations (i.e. no kernel sensitivity update)
-    kiter = 0
+    # Inner inversion iterations
+    IncPerturbationModel = deepcopy(PerturbationModel) # Incremental perturbations
+    vp_ref, vs_ref = return_isotropic_velocities(ForwardModel.Parameters) # Save starting model velocities
+    kiter, tf_run_forward = 0, isa(Observations[1].Forward, ForwardShortestPath)
     while (fstat > fcrit) && (kiter < Solver.nonlinit)
         println("Starting iteration ", string(kiter + 1), ".")
 
@@ -192,7 +194,7 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         jrow = maximum(Aᵢ) # Should equal 'nobs'
         println("Number of observations: ", string(jrow), ".")
         println("Number of parameters: ", string(npar), ".")
-
+ 
         # Compute row-sum of the Jacobian squared (RSJS)
         accumarray!(x, Aⱼ, Aᵥ, x -> x^2)
         # Assign to parameters
@@ -213,11 +215,19 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
 
         # Update Parameters
         update_parameters!(PerturbationModel, x)
+
         # Update kernels
-        update_kernel!(Kernels, PerturbationModel)
+        if tf_run_forward
+            # Update model with incremental perturbations
+            update_parameters!(IncPerturbationModel, x)
+            update_model!(ForwardModel, IncPerturbationModel)
+            update_parameters!(IncPerturbationModel, -x)
+            _, b, Kernels = psi_forward(Observations, ForwardModel)
+        else
+            update_kernel!(Kernels, PerturbationModel)
+            _, b = evaluate_kernel(Kernels)
+        end
         
-        # Re-evalute weighted sum of the squared resdiuals
-        _, b = evaluate_kernel(Kernels)
         # Compute sum of squared residuals
         wssr_l = sum(b -> b^2, b)
         ssr_l = 0.0
@@ -229,8 +239,16 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         if fstat < 1.0
             println("The LSQR solution diverged. Reverting to previous iteration.")
             update_parameters!(PerturbationModel, -x)
-            update_kernel!(Kernels, PerturbationModel)
-            _, b = evaluate_kernel(Kernels)
+            if tf_run_forward
+                update_parameters!(IncPerturbationModel, -x)
+                update_model!(ForwardModel, IncPerturbationModel)
+                update_parameters!(IncPerturbationModel, x)
+                _, b, Kernels = psi_forward(Observations, ForwardModel)
+            else
+                update_kernel!(Kernels, PerturbationModel)
+                _, b = evaluate_kernel(Kernels)
+            end
+
             wssr_l = sum(b -> b^2, b)
             ssr_l = 0.0
             [ssr_l += (b[i]*K_i.Observation.error)^2 for (i, K_i) in enumerate(Kernels)]
@@ -254,6 +272,11 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         kiter += 1
     end
 
+    # Add total perturbation to forwward model if not already done so
+    if !tf_run_forward
+        update_model!(ForwardModel, PerturbationModel)
+    end
+
     # Write results
     if !isempty(output_directory)
         # Close chi-squared file
@@ -267,16 +290,12 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         # Write parameter sampling VTK
         write_sampling_to_vtk(output_directory, PerturbationModel)
         # Write the model VTK file (with starting model)
-        vp_ref, vs_ref = return_isotropic_velocities(ForwardModel.Parameters)
-        update_model!(ForwardModel, PerturbationModel)
         write_model_to_vtk(output_directory*"/FinalModel", ForwardModel; vp_ref = vp_ref, vs_ref = vs_ref)
         # Write PsiModel files
         tf_write_sources = !isnothing(PerturbationModel.Hypocenter) || !isnothing(PerturbationModel.SourceStatics)
         tf_write_receivers = !isnothing(PerturbationModel.SourceStatics)
         write_psi_model(output_directory, ForwardModel; tf_write_sources = tf_write_sources,
         tf_write_receivers = tf_write_receivers, tf_write_parameters = true)
-    else
-        update_model!(ForwardModel, PerturbationModel)
     end
 
     return nothing

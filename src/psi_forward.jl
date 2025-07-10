@@ -261,15 +261,15 @@ struct PsiModel{P<:ModelParameterization, G, S, R}
     Parameters::P # Model Parameters
     Methods::ForwardMethodsContainer
 end
-function PsiModel(::Type{<:IsotropicVelocity}, Mesh, Sources, Receivers, Methods)
-    vp, vs = return_taup_velocities(Methods.TauP.reference_model, Mesh)
+function PsiModel(::Type{<:IsotropicVelocity}, Mesh, Sources, Receivers, Methods, taup_ref_model)
+    vp, vs = return_taup_velocities(taup_ref_model, Mesh)
     # Build seismic velocity parameters from isotropic velocities
     Parameters = IsotropicVelocity(vp, vs)
 
     return PsiModel(Mesh, Sources, Receivers, Parameters, Methods)
 end
-function PsiModel(::Type{<:HexagonalVectoralVelocity}, ratio_ϵ, ratio_η, ratio_γ, Mesh, Sources, Receivers, Methods)
-    vp, vs = return_taup_velocities(Methods.TauP.reference_model, Mesh)
+function PsiModel(::Type{<:HexagonalVectoralVelocity}, ratio_ϵ, ratio_η, ratio_γ, Mesh, Sources, Receivers, Methods, taup_ref_model)
+    vp, vs = return_taup_velocities(taup_ref_model, Mesh)
     # Build seismic velocity parameters from isotropic velocities
     T = eltype(vp)
     Parameters = HexagonalVectoralVelocity(vp, vs, zeros(T, size(Mesh)), zeros(T, size(Mesh)), zeros(T, size(Mesh)),
