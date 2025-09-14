@@ -176,8 +176,8 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
     if !isempty(output_directory)
         fid_fit = open(output_directory*"/chi_squared.txt", "w")
         println(fid_fit, "F-crit (n = ", nobs,", alpha = 0.95): ",fcrit)
-        println(fid_fit, "iteration, chi-squared, RMS, weighted RMS")
-        println(fid_fit, "0, ",wssr_k/nobs,", ",sqrt(ssr_k/nobs),", ",sqrt(wssr_k/wsum))
+        println(fid_fit, "iteration, chi-squared, RMS, weighted RMS, squared model norm")
+        println(fid_fit, "0, ",wssr_k/nobs,", ",sqrt(ssr_k/nobs),", ",sqrt(wssr_k/wsum),", 0.0")
     end
 
     # Inner inversion iterations
@@ -214,7 +214,7 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
         lsqr!(x, A, b; damp = Solver.damp, atol = Solver.atol, conlim = Solver.conlim, maxiter = Solver.maxiter, verbose = Solver.verbose, log = false)
 
         # Update Parameters
-        update_parameters!(PerturbationModel, x)
+        model_norm = update_parameters!(PerturbationModel, x)
 
         # Update kernels
         if tf_run_forward
@@ -227,12 +227,14 @@ function psi_inverse!(Observations::Vector{<:Observable}, ForwardModel::PsiModel
             update_kernel!(Kernels, PerturbationModel)
             _, b = evaluate_kernel(Kernels)
         end
+
+        # COMPUTE PERTURBATION NORMS FOR EASY L-CURVE!
         
         # Compute sum of squared residuals
         wssr_l = sum(b -> b^2, b)
         ssr_l = 0.0
         [ssr_l += (b[i]*K_i.Observation.error)^2 for (i, K_i) in enumerate(Kernels)]
-        !isempty(output_directory) ? println(fid_fit, kiter + 1,", ",wssr_l/nobs,", ",sqrt(ssr_l/nobs),", ",sqrt(wssr_l/wsum)) : nothing
+        !isempty(output_directory) ? println(fid_fit, kiter + 1,", ",wssr_l/nobs,", ",sqrt(ssr_l/nobs),", ",sqrt(wssr_l/wsum),", ",model_norm) : nothing
         # Compute new fstat
         fstat = wssr_k/wssr_l
         # Check for divergence. For non-linear inversions the solution can bounce around once it reaches a minimum.
@@ -1295,8 +1297,9 @@ end
 
 # Update all perturbation fields in a SeismicPerturbationModel
 function update_parameters!(PerturbationModel::SeismicPerturbationModel, x)
+    model_norm = 0.0
     if ~isnothing(PerturbationModel.Velocity)
-        update_parameters!(PerturbationModel.Velocity, x)
+        model_norm += update_parameters!(PerturbationModel.Velocity, x)
     end
     if ~isnothing(PerturbationModel.Interface)
         error("Interface parameter update not yet defined.")
@@ -1311,55 +1314,66 @@ function update_parameters!(PerturbationModel::SeismicPerturbationModel, x)
         update_parameters!(PerturbationModel.ReceiverStatics, x)
     end
 
-    return nothing
+    return model_norm
 end
 # Update all perturbation fields in a InverseSeismicVelocity
 function update_parameters!(PerturbationModel::InverseSeismicVelocity, x)
+    model_norm = 0.0
     if ~isnothing(PerturbationModel.Isotropic)
-        update_parameters!(PerturbationModel.Isotropic, x)
+        model_norm += update_parameters!(PerturbationModel.Isotropic, x)
     end
     if ~isnothing(PerturbationModel.Anisotropic)
-        update_parameters!(PerturbationModel.Anisotropic, x)
+        model_norm += update_parameters!(PerturbationModel.Anisotropic, x)
     end
 
-    return nothing
+    return model_norm
 end
 # Update all perturbation fields in a InverseIsotropicSlowness
 function update_parameters!(PerturbationModel::InverseIsotropicSlowness, x)
+    model_norm = 0.0
     if ~isnothing(PerturbationModel.Up)
         update_parameters!(PerturbationModel.Up, x)
+        model_norm += sum((dm_i/m_i)^2 for (dm_i, m_i) in zip(PerturbationModel.Up.dm, PerturbationModel.Up.m0))
     end
 
     if ~isnothing(PerturbationModel.Us)
         update_parameters!(PerturbationModel.Us, x)
+        model_norm += sum((dm_i/m_i)^2 for (dm_i, m_i) in zip(PerturbationModel.Us.dm, PerturbationModel.Us.m0))
     end
 
-    return nothing
+    return model_norm
 end
 # Update all perturbation fields in a InverseAnisotropicVector
 function update_parameters!(PerturbationModel::InverseAnisotropicVector, x)
+    model_norm = 0.0
     if ~isnothing(PerturbationModel.Orientations)
-        update_parameters!(PerturbationModel.Orientations, x)
+        model_norm += update_parameters!(PerturbationModel.Orientations, x)
     end
     if ~isnothing(PerturbationModel.Fractions)
         update_parameters!(PerturbationModel.Fractions, x)
     end
 
-    return nothing
+    return model_norm
 end
 # Update all perturbation fields in a InverseAzRadVector
 function update_parameters!(PerturbationModel::InverseAzRadVector, x)
+    f = zeros(size(PerturbationModel.A.dm)) # WILL ERROR IF A IS NOT DEFINED...BUT GENERALLY IS
     if ~isnothing(PerturbationModel.A)
         update_parameters!(PerturbationModel.A, x)
+        f .+= PerturbationModel.A.dm.^2
     end
     if ~isnothing(PerturbationModel.B)
         update_parameters!(PerturbationModel.B, x)
+        f .+= PerturbationModel.B.dm.^2
     end
     if ~isnothing(PerturbationModel.C)
         update_parameters!(PerturbationModel.C, x)
+        f .= sqrt.(f)
+        f .+= PerturbationModel.C.dm.^2
     end
+    model_norm = sum(x -> x^2, f)
 
-    return nothing
+    return model_norm
 end
 # Update all perturbation fields in a ParameterField
 function update_parameters!(PerturbationModel::ParameterField, x)
