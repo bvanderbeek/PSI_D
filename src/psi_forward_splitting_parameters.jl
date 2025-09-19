@@ -117,8 +117,16 @@ function kernel_split_wavelet(Kernel::ObservableKernel;
     # Rxyz = rotation_matrix((0.5*pi - Kernel.weights[end].elevation, Kernel.weights[end].azimuth), (2, 3))
     # Rxyz = Rxyz*Rqtl
 
-    TimeDomain = (t = t, s = S, sampling_period = Ts, characteristic_period = τ, isotropic_delay = Δt_iso)
-    FreqDomain = (f = fbins, u = U)
+    TimeDomain = (
+        t = t, s = S,
+        sampling_period = Ts,
+        order = order,
+        relative_length = relative_length,
+        dominant_period = Kernel.Observation.Phase.period,
+        characteristic_period = τ,
+        isotropic_delay = Δt_iso
+    )
+    FreqDomain = (f = fbins, u = U) # Just put this in the above structure...
 
     return TimeDomain, FreqDomain, Δt_weak, ζ_weak
 end
@@ -532,10 +540,15 @@ end
 # Convenience function for creating synthetic waveforms
 function write_synthetic_split_waveforms(out_dir, Kernels; rel_sampling_period = 0.01, relative_length = 5.0, order = 2)
     rpd = 180.0/pi
-    for K in Kernels
+    nobs = length(Kernels)
+    tt_pick, tt_true, si_true = zeros(nobs), zeros(nobs), zeros(nobs)
+    for (i, K) in enumerate(Kernels)
         # Compute split trace
         Ts = rel_sampling_period*K.Observation.Phase.period
         trace, _ = kernel_split_wavelet(K; order = order, sampling_period = Ts, relative_length = relative_length)
+        
+        # Measure the principal observables
+        tt_true[i], si_true[i] = measure_s_observables(trace)
 
         # Roate from S1-, S2-, L-coordinates to Q-, T-, L-coordinates
         U = cat(trace.s, zeros(1, size(trace.s,2)); dims = 1)
@@ -544,6 +557,7 @@ function write_synthetic_split_waveforms(out_dir, Kernels; rel_sampling_period =
         # Very simple travel-time estimate -- max 2-component amplitude
         a12 = sqrt.(U[1,:].^2 .+ U[2,:].^2)
         _, jmax = findmax(a12)
+        tt_pick[i] = trace.isotropic_delay + trace.t[jmax]
 
         # Roate from Q-, T-, L-coordinates to E-, N-, Z-coordinates
         Rxyz = rotation_matrix((0.5*pi - K.weights[end].elevation, K.weights[end].azimuth), (2, 3))
@@ -555,18 +569,67 @@ function write_synthetic_split_waveforms(out_dir, Kernels; rel_sampling_period =
         src_id, rcv_id = string(K.Observation.source_id), K.Observation.receiver_id
         Td = string(round(Int, 1000.0*K.Observation.Phase.period))
         # Write file
-        fid = open(out_dir * "/SYN." * src_id * "." * rcv_id * ".ENZ.T" * Td * "ms.dat", "w")
-        println(fid, t_start,", ",t_end,", ",n_samples)
-        println(fid, baz,", ",inc,", ",paz)
-        println(fid, trace.isotropic_delay,", ",trace.t[jmax])
-        for j in 1:n_samples
-            println(fid, U[1,j],", ",U[2,j],", ",U[3,j])
+        if !isempty(out_dir)
+            fid = open(out_dir * "/SYN." * src_id * "." * rcv_id * ".ENZ.T" * Td * "ms.dat", "w")
+            println(fid, t_start,", ",t_end,", ",n_samples)
+            println(fid, baz,", ",inc,", ",paz)
+            println(fid, trace.isotropic_delay,", ",tt_pick[i],", ",tt_true[i],", ",si_true[i])
+            for j in 1:n_samples
+                println(fid, U[1,j],", ",U[2,j],", ",U[3,j])
+            end
+            close(fid)
         end
-        close(fid)
     end
-    return nothing
+    return tt_pick, tt_true, si_true
 end
 
+# Function to compute principal delay and splitting intensity from
+# synthetic S-wavelets
+function measure_s_observables(split_trace)
+    (t = t, s = S, sampling_period = Ts, characteristic_period = τ, isotropic_delay = Δt_iso)
+    # Define reference waveform
+    f, q_0, τ, Ts = fd_gaussian_wavelet(
+        split_trace.dominant_period;
+        order = split_trace.order,
+        sampling_period = split_trace.sampling_period,
+        relative_length = split_trace.relative_length
+    )
+    # Define its derivative
+    dq_0 = 2im*pi*f.*q_0
+    # Time domain signals
+    u_0, du_0 = real(ifft!(ifftshift(q_0))), real(ifft!(ifftshift(dq_0)))
+
+    # Compute principal delay
+    s_1, s_2 = @views split_trace.s[1,:], split_trace.s[2,:]
+    r, lags = td_xcorr(s_1, u_0)
+    _, i_rmax = findmax(r)
+    ttime = split_trace.isotropic_delay + lags[i_rmax]*split_trace.sampling_period
+
+    # Compute splitting intensity
+    spint = sum(s_2.*du_0)/sum(du_0.*du_0)
+
+    return ttime, spint
+end
+
+# Simple time-domain cross-correlation function.
+# Computes correlation between f and lagged versions of g, (f⋆g(t + τ))
+# Note, negative lag = advance of g relative to f.
+function td_xcorr(f::AbstractArray{T,1}, g::AbstractArray{T,1}) where {T<:Real}
+    length(f) != length(g) && throw(ArgumentError("f and g must have the same length!"))
+    n = length(f)
+    dn = (1-n):(n-1) # Discrete lags
+    r = zeros(T, length(dn)) # Correlation function
+    for (i, dn_i) in enumerate(dn)
+        # Why negative? Application of a negative lag implies collecting later samples
+        ng_a = max(1, 1 - dn_i) # [n, 2-n]
+        ng_b = min(n, n - dn_i) # [2n-1, 1]
+        for ng_j in ng_a:ng_b
+            r[i] += f[ng_j+dn_i] * g[ng_j]
+        end
+    end
+    r ./= sqrt(sum(x->x^2, f)*sum(x->x^2, g))
+    return r, dn
+end
 
 # Plotting Functions
 function station_averaged_splits(Observations, Receivers)
