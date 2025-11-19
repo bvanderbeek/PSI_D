@@ -332,7 +332,7 @@ function splitting_parameters_grid_search(s1, s2, sampling_period, split_times, 
         x_limits, y_limits = (extrema(split_times), (180.0/π).*extrema(split_azimuths))
         ratio_xy = abs(y_limits[2] - y_limits[1])/abs(x_limits[2] - x_limits[1])
         hf = heatmap((180.0/π)*split_azimuths, split_times, Fsamp, color=:inferno, aspect_ratio = ratio_xy,
-        xlim = y_limits, ylim = x_limits, xlabel = "fast-azimuth (°)", ylabel = "split time (s)", title = "Transverse Energy")
+        xlim = y_limits, ylim = x_limits, xlabel = "fast-azimuth (°)", ylabel = "split time (s)", title = "Objective Function")
         scatter!([180.0*split_azimuths[jmin]/π], [split_times[imin]], label = "")
         display(hf)
     end
