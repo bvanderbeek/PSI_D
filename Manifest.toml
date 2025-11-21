@@ -891,8 +891,8 @@ uuid = "6c6a2e73-6563-6170-7368-637461726353"
 version = "1.2.1"
 
 [[deps.SeismicDijkstra]]
-deps = ["DelimitedFiles", "Interpolations", "NearestNeighbors", "QuickHeaps"]
-git-tree-sha1 = "58739d2c69a12026bc31abde536b37659411c8a8"
+deps = ["DelimitedFiles", "Interpolations", "NearestNeighbors", "QuickHeaps", "StaticArrays", "WriteVTK"]
+git-tree-sha1 = "9597ff5c66c488db891b95965b9e667ccbc7428d"
 repo-rev = "main"
 repo-url = "https://github.com/bvanderbeek/SeismicDijkstra.jl.git"
 uuid = "7784e2a6-fddc-487f-ba3b-f62c786111aa"
