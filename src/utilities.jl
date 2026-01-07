@@ -164,3 +164,54 @@ function cartesian_to_spherical(x, y, z)
     r = sqrt(x^2 + y^2 + z^2)
     return ϕ, θ, r
 end
+
+function check_taup_up_down(Events, Stations, Data, ref_model; dR = 0.0, Rref = 6371.0)
+    tf_extended = dR > 0.0
+    nobs = length(Data)
+    kbad, sld = falses(nobs), zeros(nobs)
+    tt, dist, baz, phase_out = zeros(nobs), zeros(nobs), zeros(nobs), Vector{String}(undef, nobs)
+
+    TimeObj = buildTimeObj(ref_model)
+    for (k, B) in enumerate(Data)
+        # Indexing
+        evt_k, sta_k = B.source_id, B.receiver_id # Event and station ID
+        j_evt, j_sta = Events.id[evt_k], Stations.id[sta_k] # Event and station linear index
+        # Event-station distance
+        evt_lon, evt_lat, evt_elv = Events.coordinates[j_evt]
+        sta_lon, sta_lat, sta_elv = Stations.coordinates[j_sta]
+        dist[k], baz[k] = inverse_geodesic(sta_lat, sta_lon, evt_lat, evt_lon; tf_degrees = true)
+        # Adjusted source and receiver depths
+        evt_dpt, sta_dpt = tf_extended ? (dR - evt_elv, dR - sta_elv) : (-evt_elv, 0.0)
+        # Phase names
+        if B.Phase.name == "p" || B.Phase.name == "P"
+            phase_up, phase_down = "p", "P"
+        elseif B.Phase.name == "s" || B.Phase.name == "S"
+             phase_up, phase_down = "s", "S"
+        else
+            error("Only direct phases!")
+        end
+
+        # Compare phases
+        tt_u, _ = taup_time!(TimeObj, phase_up, dist[k], evt_dpt, sta_dpt)
+        tt_u = isnan(tt_u) ? Inf : tt_u
+        tt_d, _ = taup_time!(TimeObj, phase_down, dist[k], evt_dpt, sta_dpt)
+        tt_d = isnan(tt_d) ? Inf : tt_d
+        # Select first arriving phase
+        tt[k], phase_out[k] = tt_d < tt_u ? (tt_d, phase_down) : (tt_u, phase_up)
+        kbad[k] = isinf(tt[k]) || isnan(tt[k]) ? true : false
+
+        # Compute straight-line-distance
+        r_1, r_2 = Rref + evt_elv, Rref + sta_elv
+        sinϕ_1, cosϕ_1 = sincosd(evt_lat)
+        sinλ_1, cosλ_1 = sincosd(evt_lon)
+        sinϕ_2, cosϕ_2 = sincosd(sta_lat)
+        sinλ_2, cosλ_2 = sincosd(sta_lon)
+        x_1, y_1, z_1 = r_1*cosϕ_1*cosλ_1, r_1*cosϕ_1*sinλ_1, r_1*sinϕ_1
+        x_2, y_2, z_2 = r_2*cosϕ_2*cosλ_2, r_2*cosϕ_2*sinλ_2, r_2*sinϕ_2
+        sld[k] = sqrt((x_2 - x_1)^2 + (y_2 - y_1)^2 + (z_2 - z_1)^2)
+    end
+    nbad = sum(kbad)
+    nbad > 0 && (@warn "There are "*string(nbad)*" bad events!")
+
+    return kbad, tt, dist, baz, phase_out, sld
+end
