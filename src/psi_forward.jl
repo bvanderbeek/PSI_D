@@ -423,6 +423,7 @@ function psi_forward(Observations::Vector{B}, Model::PsiModel{P}) where {B <: Ob
             predictions[i], relative_residuals[i], Kernels[i] = psi_forward(Observations[i], Model)
         end
     elseif isa(Observations[1].Forward, ForwardShortestPath)
+        println("Starting 3D ray tracing...")
         predictions, relative_residuals, Kernels, _ = psi_forward_seismic_dijkstra(Observations, Model; length_0 = 0.0, pred = 0)
     else
         error("Unknown forward method!")

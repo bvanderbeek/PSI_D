@@ -559,32 +559,29 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSl
 end
 # Differentiate IsotropicVelocity S-wave Travel-Time with respect to IsotropicSlowness
 function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:TravelTime{<:ShearWave}, <:IsotropicVelocity}, index)
-    if PerturbationModel.coupling_option == 0
+    if (PerturbationModel.coupling_option == 0) && ~isnothing(PerturbationModel.Us)
         # Inversion for S-slowness
         dtdm = Kernel.weights[index].dr
-    elseif PerturbationModel.coupling_option == 1
-        # Sensitivity to P-slowness
-        # Kernel coordinates in P-slowness mesh
-        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Up.Mesh.Geometry)
-        # Estimate P-slowness at kernel coordinate for current iteration
-        up = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.m0, x_local; tf_extrapolate = false, tf_harmonic = false)
-        up += linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.dm, x_local; tf_extrapolate = false, tf_harmonic = false)
-        # Compute sensitivity to P-slowness
-        dtdm = Kernel.weights[index].dr/(up*Kernel.Parameters.vs[index])
-        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Up.Mesh, x_local, dtdm, PerturbationModel.Up.jcol[1])
-
-        # Sensitivity to S-to-P slowness ratio
-        dtdm = up*Kernel.weights[index].dr
-    else
-        error("Unrecognized couplinf option!")
-    end
-
-    # Sensitivity to S-slowness or S-to-P slowness ratio
-    if ~isnothing(PerturbationModel.Us)
-        # Kernel coordinates in perturbational mesh coordinate system
         x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Us.Mesh.Geometry)
-        # Map partial derivatives to inversion parameters. Travel-time slowness partial is simply the kernel weight distribued amongst the parameters.
         map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local, dtdm, PerturbationModel.Us.jcol[1])
+    elseif (PerturbationModel.coupling_option == 1) && ~isnothing(PerturbationModel.Us)
+        # Interpolate S-to-P slowness ratio to kernel coordinate
+        # (ratio is stored in PerturbationModel.Us when coupling option = 1)
+        x_local_s = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Us.Mesh.Geometry)
+        r_us_up = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.m0, x_local_s; tf_extrapolate = false, tf_harmonic = false)
+        r_us_up += linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.dm, x_local_s; tf_extrapolate = false, tf_harmonic = false)
+        # Interpolate P-slowness to kernel coordinate
+        x_local_p = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Up.Mesh.Geometry)
+        up = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.m0, x_local_p; tf_extrapolate = false, tf_harmonic = false)
+        up += linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.dm, x_local_p; tf_extrapolate = false, tf_harmonic = false)
+        # Compute sensitivity to P-slowness
+        dtdup = Kernel.weights[index].dr*r_us_up
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Up.Mesh, x_local_p, dtdup, PerturbationModel.Up.jcol[1])
+        # Sensitivity to S-to-P slowness ratio
+        dtdm = Kernel.weights[index].dr*up
+        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local_s, dtdm, PerturbationModel.Us.jcol[1])
+    else
+        error("Unrecognized coupling option!")
     end
 
     return nothing
@@ -609,7 +606,7 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSl
 end
 # Differentiate HexagonalVectoralVelocity S-wave Travel-Time with respect to IsotropicSlowness
 function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSlowness, Kernel::ObservableKernel{<:TravelTime{<:ShearWave}, <:HexagonalVectoralVelocity}, index)
-    if PerturbationModel.coupling_option == 0
+    if PerturbationModel.coupling_option == 0 || PerturbationModel.coupling_option == 1
         # Invarient Isotropic S-velocity
         _, β₀ = return_isotropic_velocities(Kernel.Parameters, index)
         # Extract Thomsen Parameters
@@ -622,12 +619,29 @@ function psi_differentiate_kernel!(Wj, Wv, PerturbationModel::InverseIsotropicSl
             vqs1, vqs2, _, ζ = qs_phase_velocities_thomsen(Kernel.weights[index].azimuth, Kernel.weights[index].elevation,
             Kernel.Observation.Phase.paz, Kernel.Parameters.azimuth[index], Kernel.Parameters.elevation[index], α, β, ϵ - δ, γ)
         end
-        # Isotropic slowness derivative
-        dtdu = Kernel.weights[index].dr*( (β₀/vqs2) + ( (2.0*β*β₀/(vqs1^2)) - (β₀/vqs1) - (β₀/vqs2) )*(cos(ζ)^2) )
+        # Isotropic S-slowness derivative
+        dtdus = Kernel.weights[index].dr*( (β₀/vqs2) + ( (2.0*β*β₀/(vqs1^2)) - (β₀/vqs1) - (β₀/vqs2) )*(cos(ζ)^2) )
         # Kernel coordinates in perturbational mesh coordinate system
-        x_local = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Us.Mesh.Geometry)
-        # Map partial derivatives to inversion parameters
-        map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local, dtdu, PerturbationModel.Us.jcol[1])
+        x_local_s = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Us.Mesh.Geometry)
+        if PerturbationModel.coupling_option == 0
+            # Map partial derivatives to inversion parameters
+            map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local_s, dtdus, PerturbationModel.Us.jcol[1])
+        else
+            # Interpolate S-to-P slowness ratio to kernel coordinate
+            # (ratio is stored in PerturbationModel.Us when coupling option = 1)
+            r_us_up = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.m0, x_local_s; tf_extrapolate = false, tf_harmonic = false)
+            r_us_up += linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.dm, x_local_s; tf_extrapolate = false, tf_harmonic = false)
+            # Interpolate P-slowness to kernel coordinate
+            x_local_p = global_to_local(Kernel.coordinates[index][1], Kernel.coordinates[index][2], Kernel.coordinates[index][3], PerturbationModel.Up.Mesh.Geometry)
+            up = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.m0, x_local_p; tf_extrapolate = false, tf_harmonic = false)
+            up += linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.dm, x_local_p; tf_extrapolate = false, tf_harmonic = false)
+            # Sensitivity to P-slowness
+            dtdup = Kernel.weights[index].dr*r_us_up
+            map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Up.Mesh, x_local_p, dtdup, PerturbationModel.Up.jcol[1])
+            # Sensitivity to S-to-P slowness ratio
+            dtdm = dtdus*up
+            map_partial_to_jacobian!(Wj, Wv, PerturbationModel.Us.Mesh, x_local_s, dtdm, PerturbationModel.Us.jcol[1])
+        end
     else
         error("Unrecognized coupling option!")
     end
@@ -1487,6 +1501,11 @@ end
 function update_kernel!(Kernel::ObservableKernel, PerturbationModel::InverseIsotropicSlowness)
     # Get pointers to velocity fields
     vp_field, vs_field = return_velocity_fields(Kernel.Parameters)
+    # Convert to us/up ratio *prior* to any update
+    if (PerturbationModel.coupling_option == 1) && ~isnothing(vs_field)
+        vs_field ./= vp_field
+        vs_field .= inv.(vs_field)
+    end
 
     # Update P-Velocities
     if ~isnothing(vp_field) && ~isnothing(PerturbationModel.Up)
@@ -1508,31 +1527,37 @@ function update_kernel!(Kernel::ObservableKernel, PerturbationModel::InverseIsot
             # Convert back to velocity
             vs_field .= inv.(vs_field)
         elseif PerturbationModel.coupling_option == 1
-            # Inversion for S-to-P slowness ratio. How to do this update?
-            #   us = r*up -> Dus = r*(dus/dup) + (dus/dr)*up
-            #   us = (r + dr)*(up + dup) = r*up + r*dup + dr*up + dr*dup = us + r*dup + dr*up + dr*dup
-            for (i, xq) in enumerate(Kernel.coordinates)
-                # Convert global kernel coordinates to the local mesh coordinates
-                xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Us.Mesh.Geometry)
-                # Interpolate starting S-to-P slowness ratio
-                r = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.m0, (xl, yl, zl);
-                tf_extrapolate = false, tf_harmonic = false)
-                # Interpolate the cumulative S-to-P slowness ratio perturbation
-                dr = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.dm, (xl, yl, zl);
-                tf_extrapolate = false, tf_harmonic = false)
-                # Interpolate the incremental S-to-P slowness ratio perturbation
-                ddr = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.ddm, (xl, yl, zl);
-                tf_extrapolate = false, tf_harmonic = false)
-                # Interpolate incremental perturbation to P-slowness
-                xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Up.Mesh.Geometry)
-                ddup = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.ddm, (xl, yl, zl);
-                tf_extrapolate = false, tf_harmonic = false)
-                # P-slowness at previous iteration
-                r = r + dr - ddr
-                up = 1.0/(r*vs_field[i])
-                # S-velocity update
-                vs_field[i] = 1.0/((1.0/vs_field[i]) + r*ddup + ddr*up + ddr*ddup)
-            end
+            # Interpolate and add S-to-P slowness ratio perturbations
+            update_kernel_field!(vs_field, Kernel, PerturbationModel.Us; tf_extrapolate = false, tf_harmonic = false)
+            # Convert back to velocity
+            vs_field .= inv.(vs_field) # vs/vp ratio
+            vs_field .*= vp_field # New vs
+
+            # # Inversion for S-to-P slowness ratio. How to do this update?
+            # #   us = r*up -> Dus = r*(dus/dup) + (dus/dr)*up
+            # #   us = (r + dr)*(up + dup) = r*up + r*dup + dr*up + dr*dup = us + r*dup + dr*up + dr*dup
+            # for (i, xq) in enumerate(Kernel.coordinates)
+            #     # Convert global kernel coordinates to the local mesh coordinates
+            #     xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Us.Mesh.Geometry)
+            #     # Interpolate starting S-to-P slowness ratio
+            #     r = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.m0, (xl, yl, zl);
+            #     tf_extrapolate = false, tf_harmonic = false)
+            #     # Interpolate the cumulative S-to-P slowness ratio perturbation
+            #     dr = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.dm, (xl, yl, zl);
+            #     tf_extrapolate = false, tf_harmonic = false)
+            #     # Interpolate the incremental S-to-P slowness ratio perturbation
+            #     ddr = linearly_interpolate(PerturbationModel.Us.Mesh.x, PerturbationModel.Us.ddm, (xl, yl, zl);
+            #     tf_extrapolate = false, tf_harmonic = false)
+            #     # Interpolate incremental perturbation to P-slowness
+            #     xl, yl, zl = global_to_local(xq[1], xq[2], xq[3], PerturbationModel.Up.Mesh.Geometry)
+            #     ddup = linearly_interpolate(PerturbationModel.Up.Mesh.x, PerturbationModel.Up.ddm, (xl, yl, zl);
+            #     tf_extrapolate = false, tf_harmonic = false)
+            #     # P-slowness at previous iteration
+            #     r = r + dr - ddr
+            #     up = 1.0/(r*vs_field[i])
+            #     # S-velocity update
+            #     vs_field[i] = 1.0/((1.0/vs_field[i]) + r*ddup + ddr*up + ddr*ddup)
+            # end
         else
             error("Coupling option not implemented!")
         end
@@ -1678,6 +1703,11 @@ end
 function update_model!(Model::PsiModel, PerturbationModel::InverseIsotropicSlowness)
     # Get pointers to velocity fields
     vp_field, vs_field = return_velocity_fields(Model.Parameters)
+    # Convert to us/up ratio *prior* to any update
+    if (PerturbationModel.coupling_option == 1) && ~isnothing(vs_field)
+        vs_field ./= vp_field
+        vs_field .= inv.(vs_field)
+    end
 
     if ~isnothing(PerturbationModel.Up)
         # Convert to slowness
@@ -1698,6 +1728,13 @@ function update_model!(Model::PsiModel, PerturbationModel::InverseIsotropicSlown
             tf_extrapolate = false, tf_harmonic = false)
             # Convert back to velocity
             vs_field .= inv.(vs_field)
+        elseif PerturbationModel.coupling_option == 1
+            # Add S-to-P slowness ratio perturbations
+            add_perturbations!(vs_field, PerturbationModel.Us.Mesh, PerturbationModel.Us.dm, Model.Mesh;
+            tf_extrapolate = false, tf_harmonic = false)
+            # Convert back to velocity
+            vs_field .= inv.(vs_field) # vs/vp ratio
+            vs_field .*= vp_field # New vs
         else
             error("Model update not implemented!")
         end
@@ -1808,17 +1845,14 @@ function interpolate_parameters!(OutField::InverseIsotropicSlowness, InField::Ps
         OutField.Up.m0 .= inv.(OutField.Up.m0)
     end
     if ~isnothing(OutField.Us)
-        interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.vs, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
-        # Convert back to slowness
-        OutField.Us.m0 .= inv.(OutField.Us.m0)
-        if OutField.coupling_option == 1
-            # Convert S-Slownes to S-to-P slowness ratio (i.e. Vp/Vs ratio)
-            # This conversion could be done without allocation but I'm being lazy here...
-            vp_field = zeros(eltype(OutField.Us), size(OutField.Us.Mesh))
-            # Interpolate P-velocity field to the S-slowness inversion mesh
-            interpolate_field!(vp_field, InField.Mesh, InField.Parameters.vp, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
-            # Compute ratio
-            OutField.Us.m0 .*= vp_field
+        if OutField.coupling_option == 0
+            interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.vs, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+            # Convert back to slowness
+            OutField.Us.m0 .= inv.(OutField.Us.m0)
+        elseif OutField.coupling_option == 1
+            interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.vp./InField.Parameters.vs, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        else
+            error("Undefined coupling option!")
         end
     end
 
@@ -1828,7 +1862,9 @@ function interpolate_parameters!(OutField::InverseIsotropicSlowness, InField::Ps
     
     # Convert reference velocities to isotropic velocities before interpolation
     # convert_parameters!(OutField, InField.Parameters) # <---- NOT NEEDED IF STARTING MODEL IS ASSUMED ISOTROPIC!
-
+    if any(x -> x > 0.0, InField.Parameters.f)
+        @warn "Fix me! Anisotropic starting models not implemented!"
+    end
     if ~isnothing(OutField.Up)
         # Interpolate the isotropic velocities
         interpolate_field!(OutField.Up.m0, InField.Mesh, InField.Parameters.α, OutField.Up.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
@@ -1836,17 +1872,14 @@ function interpolate_parameters!(OutField::InverseIsotropicSlowness, InField::Ps
         OutField.Up.m0 .= inv.(OutField.Up.m0)
     end
     if ~isnothing(OutField.Us)
-        interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.β, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
-        # Convert back to slowness
-        OutField.Us.m0 .= inv.(OutField.Us.m0)
-        if OutField.coupling_option == 1
-            # Convert S-Slownes to S-to-P slowness ratio (i.e. Vp/Vs ratio)
-            # This conversion could be done without allocation but I'm being lazy here...
-            vp_field = zeros(eltype(OutField.Us), size(OutField.Us.Mesh))
-            # Interpolate P-velocity field to the S-slowness inversion mesh
-            interpolate_field!(vp_field, InField.Mesh, InField.Parameters.vp, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
-            # Compute ratio
-            OutField.Us.m0 .*= vp_field
+        if OutField.coupling_option == 0
+            interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.β, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+            # Convert back to slowness
+            OutField.Us.m0 .= inv.(OutField.Us.m0)
+        elseif OutField.coupling_option == 1
+            interpolate_field!(OutField.Us.m0, InField.Mesh, InField.Parameters.α./InField.Parameters.β, OutField.Us.Mesh; tf_extrapolate = tf_extrapolate, tf_harmonic = tf_harmonic)
+        else
+            error("Undefined coupling option!")
         end
     end
 
